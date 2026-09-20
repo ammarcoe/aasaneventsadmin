@@ -1,0 +1,29 @@
+@theme {
+  --color-bg:              #FBF8F1;
+  --color-surface:         #FFFFFF;
+  --color-surface-subtle:  #F6F3E9;
+  --color-control:         #EFEFE4;
+  --color-control-disabled:#F4F2E9;
+
+  --color-ink:             #141712;
+  --color-ink-muted:       #5E6853;
+  --color-ink-faint:       #8C9581;
+  --color-ink-disabled:    #C6CBBA;
+  --color-on-ink:          #FBF8F1;
+
+  --color-accent:          #9AB17A;
+  --color-accent-deep:     #708257;
+  --color-secondary:       #C3CC9B;
+  --color-sand:            #E4DFB5;
+
+  --color-crimson:         #A90101;
+  --color-crimson-surface: #A9010114;
+
+  --color-border:          #C3CC9B40;
+  --color-border-strong:   #C3CC9BE6;
+
+  --radius-sm: 8px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-xl: 20px;
+}

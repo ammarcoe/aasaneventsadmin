@@ -1,0 +1,35 @@
+{
+  "hosting": {
+    "public": "out",
+    "ignore": [
+      "firebase.json",
+      "**/.*",
+      "**/node_modules/**"
+    ],
+    "cleanUrls": true,
+    "rewrites": [
+      {
+        "source": "/events/*/registrations",
+        "destination": "/events/_/registrations.html"
+      },
+      {
+        "source": "/events/[!new]*",
+        "destination": "/events/_.html"
+      },
+      {
+        "source": "/organizers/[!new]*",
+        "destination": "/organizers/_.html"
+      },
+      {
+        "source": "**",
+        "destination": "/index.html"
+      }
+    ]
+  },
+  "firestore": {
+    "rules": "firestore.rules"
+  },
+  "storage": {
+    "rules": "storage.rules"
+  }
+}
