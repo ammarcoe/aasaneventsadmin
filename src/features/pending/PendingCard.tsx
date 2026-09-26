@@ -58,7 +58,9 @@ export function PendingCard({
 
   const capacity =
     primaryEvent.capacity ??
-    primaryEvent.ticketTypes.reduce((acc, t) => acc + (t.capacity || 0), 0);
+    (Array.isArray(primaryEvent.ticketTypes)
+      ? primaryEvent.ticketTypes.reduce((acc, t) => acc + (t.capacity || 0), 0)
+      : 0);
 
   const priceDisplay =
     primaryEvent.priceMinPkr === 0 || (!primaryEvent.priceMinPkr && !primaryEvent.priceMaxPkr)

@@ -26,7 +26,7 @@ export function Sidebar() {
 
   // Poll pending count every 60 seconds
   const { data: pendingCount = 0 } = useQuery({
-    queryKey: qk.events.pending,
+    queryKey: qk.events.pendingCount,
     queryFn: async () => {
       try {
         const q = query(collection(db, "events"), where("status", "==", "pending"));

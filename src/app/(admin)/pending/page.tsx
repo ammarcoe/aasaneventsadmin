@@ -34,10 +34,12 @@ export default function PendingPage() {
 
   // Group pending events by seriesId
   const pendingGroups: PendingGroup[] = useMemo(() => {
+    const rawEvents = Array.isArray(pendingEvents) ? pendingEvents : [];
     const map = new Map<string, Event[]>();
     const singles: Event[] = [];
 
-    pendingEvents.forEach((ev) => {
+    rawEvents.forEach((ev) => {
+      if (!ev) return;
       if (ev.seriesId) {
         const list = map.get(ev.seriesId) || [];
         list.push(ev);
@@ -51,12 +53,18 @@ export default function PendingPage() {
 
     // Series groups
     map.forEach((events, seriesId) => {
-      events.sort((a, b) => a.startTime.getTime() - b.startTime.getTime());
-      groups.push({
-        isSeries: true,
-        seriesId,
-        events,
+      events.sort((a, b) => {
+        const aTime = a.startTime instanceof Date ? a.startTime.getTime() : 0;
+        const bTime = b.startTime instanceof Date ? b.startTime.getTime() : 0;
+        return aTime - bTime;
       });
+      if (events.length > 0) {
+        groups.push({
+          isSeries: true,
+          seriesId,
+          events,
+        });
+      }
     });
 
     // Singles
@@ -69,8 +77,8 @@ export default function PendingPage() {
 
     // Sort groups by the creation date of their first event
     return groups.sort((a, b) => {
-      const aTime = a.events[0]?.createdAt?.getTime() || 0;
-      const bTime = b.events[0]?.createdAt?.getTime() || 0;
+      const aTime = a.events[0]?.createdAt instanceof Date ? a.events[0].createdAt.getTime() : 0;
+      const bTime = b.events[0]?.createdAt instanceof Date ? b.events[0].createdAt.getTime() : 0;
       return aTime - bTime;
     });
   }, [pendingEvents]);

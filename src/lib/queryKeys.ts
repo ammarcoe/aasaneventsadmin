@@ -6,6 +6,7 @@ export const qk = {
     list: (f?: EventFilter) => ["events", "list", f ?? {}] as const,
     detail: (id: string) => ["events", "detail", id] as const,
     pending: ["events", "pending"] as const,
+    pendingCount: ["events", "pending-count"] as const,
   },
   organizers: {
     all: ["organizers"] as const,
