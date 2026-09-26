@@ -4,15 +4,61 @@ import {
   GeoPoint,
   serverTimestamp,
 } from "firebase/firestore";
-import type { Event, Organizer, Registration, TicketType } from "@/types";
+import type { Event, Organizer, Registration, TicketType, EventImage } from "@/types";
+
+export function parseEventImages(d: Record<string, unknown>): EventImage[] {
+  if (Array.isArray(d.images) && d.images.length > 0) {
+    return d.images.map((img: Record<string, unknown>, idx: number) => {
+      const sizes = (img.sizes as Record<string, string>) || {};
+      const fallbackUrl = (img.url as string) || (img.path as string) || "";
+      return {
+        id: (img.id as string) || `img_${idx}`,
+        path: (img.path as string) || fallbackUrl,
+        sizes: {
+          s: sizes.s || sizes.m || sizes.l || fallbackUrl,
+          m: sizes.m || sizes.l || fallbackUrl,
+          l: sizes.l || fallbackUrl,
+        },
+        w: Number(img.w || 1200),
+        h: Number(img.h || 800),
+        focalX: typeof img.focalX === "number" ? img.focalX : 0.5,
+        focalY: typeof img.focalY === "number" ? img.focalY : 0.5,
+        fit: (img.fit as "fill" | "fit") || "fill",
+        bg: (img.bg as string) || "#FAF6F0",
+        alt: (img.alt as string) || null,
+      };
+    });
+  }
+  if (Array.isArray(d.imageUrls) && d.imageUrls.length > 0) {
+    return d.imageUrls.map((url: string, idx: number) => ({
+      id: `legacy_${idx}`,
+      path: url,
+      sizes: { s: url, m: url, l: url },
+      w: 1200,
+      h: 800,
+      focalX: 0.5,
+      focalY: 0.5,
+      fit: "fill" as const,
+      bg: "#FAF6F0",
+      alt: null,
+    }));
+  }
+  return [];
+}
 
 export const eventConverter: FirestoreDataConverter<Event> = {
   toFirestore: (e) => {
     const ev = e as Event;
+    const derivedImageUrls =
+      Array.isArray(ev.images) && ev.images.length > 0
+        ? ev.images.map((i) => i.sizes?.l || i.path)
+        : ev.imageUrls ?? [];
+
     const data: Record<string, unknown> = {
       title: ev.title,
       description: ev.description ?? null,
-      imageUrls: ev.imageUrls ?? [],
+      images: ev.images ?? [],
+      imageUrls: derivedImageUrls,
       categoryId: ev.categoryId,
       tags: ev.tags ?? [],
       startTime: ev.startTime instanceof Date ? Timestamp.fromDate(ev.startTime) : null,
@@ -36,6 +82,14 @@ export const eventConverter: FirestoreDataConverter<Event> = {
         : [],
       isFeatured: Boolean(ev.isFeatured),
       status: ev.status || "draft",
+      agenda: Array.isArray(ev.agenda) ? ev.agenda : [],
+      faq: Array.isArray(ev.faq) ? ev.faq : [],
+      amenities: Array.isArray(ev.amenities) ? ev.amenities : [],
+      audience: Array.isArray(ev.audience) ? ev.audience : [],
+      languages: Array.isArray(ev.languages) ? ev.languages : [],
+      seriesId: ev.seriesId ?? null,
+      seriesIndex: typeof ev.seriesIndex === "number" ? ev.seriesIndex : null,
+      seriesCount: typeof ev.seriesCount === "number" ? ev.seriesCount : null,
       mapImageUrl: ev.mapImageUrl ?? null,
       updatedAt: serverTimestamp(),
     };
@@ -111,11 +165,16 @@ export const eventConverter: FirestoreDataConverter<Event> = {
     const totalSold = ticketTypes.reduce((acc, t) => acc + (t.soldCount || 0), 0);
     const totalCapacity = ticketTypes.reduce((acc, t) => acc + (t.capacity || 0), 0);
 
+    const images = parseEventImages(d);
+
     return {
       id: snap.id,
       title: d.title || "",
       description: d.description ?? null,
-      imageUrls: Array.isArray(d.imageUrls) ? d.imageUrls : [],
+      images,
+      imageUrls: Array.isArray(d.imageUrls)
+        ? d.imageUrls
+        : images.map((i) => i.sizes.l),
       categoryId: d.categoryId || "",
       tags: Array.isArray(d.tags) ? d.tags : [],
       startTime,
@@ -132,6 +191,14 @@ export const eventConverter: FirestoreDataConverter<Event> = {
       ticketTypes,
       isFeatured: Boolean(d.isFeatured),
       status: d.status || "draft",
+      agenda: Array.isArray(d.agenda) ? d.agenda : [],
+      faq: Array.isArray(d.faq) ? d.faq : [],
+      amenities: Array.isArray(d.amenities) ? d.amenities : [],
+      audience: Array.isArray(d.audience) ? d.audience : [],
+      languages: Array.isArray(d.languages) ? d.languages : [],
+      seriesId: (d.seriesId as string) ?? null,
+      seriesIndex: typeof d.seriesIndex === "number" ? d.seriesIndex : null,
+      seriesCount: typeof d.seriesCount === "number" ? d.seriesCount : null,
       soldCount: d.soldCount != null ? Number(d.soldCount) : totalSold,
       capacity: d.capacity != null ? Number(d.capacity) : totalCapacity,
       mapImageUrl: d.mapImageUrl ?? null,

@@ -16,12 +16,14 @@ import {
   getCountFromServer,
   Timestamp,
   GeoPoint,
+  writeBatch,
 } from "firebase/firestore";
 import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase";
 import { eventConverter, organizerConverter, registrationConverter } from "@/lib/converters";
 import type { Event, EventFilter, TicketType } from "@/types";
 import type { EventFormValues } from "./schema";
+import { stripAppOwnedFields } from "./constants";
 
 const eventsCol = collection(db, "events").withConverter(eventConverter);
 
@@ -81,14 +83,19 @@ export async function fetchEvent(id: string): Promise<Event | null> {
   return snap.data();
 }
 
+/**
+ * Fetches all pending events. Queries without composite orderBy to avoid missing index errors,
+ * and sorts in-memory by createdAt ascending.
+ */
 export async function fetchPendingEvents(): Promise<Event[]> {
-  const q = query(
-    eventsCol,
-    where("status", "==", "pending"),
-    orderBy("createdAt", "asc")
-  );
+  const q = query(eventsCol, where("status", "==", "pending"));
   const snap = await getDocs(q);
-  return snap.docs.map((d) => d.data());
+  const list = snap.docs.map((d) => d.data());
+  return list.sort((a, b) => {
+    const aTime = a.createdAt?.getTime() || 0;
+    const bTime = b.createdAt?.getTime() || 0;
+    return aTime - bTime;
+  });
 }
 
 /**
@@ -126,16 +133,22 @@ export async function recomputeOrganizerCounts(organizerId: string): Promise<voi
 }
 
 /**
- * Creates an event as draft
+ * Creates an event as draft conforming to Event Schema v2
  */
 export async function createEvent(data: EventFormValues): Promise<string> {
+  const derivedImageUrls =
+    data.images && data.images.length > 0
+      ? data.images.map((img) => img.sizes.l)
+      : data.imageUrls || [];
+
   const newDoc = await addDoc(eventsCol, {
     id: "",
     title: data.title,
     description: data.description ?? null,
-    imageUrls: data.imageUrls,
+    images: data.images || [],
+    imageUrls: derivedImageUrls,
     categoryId: data.categoryId,
-    tags: data.tags,
+    tags: data.tags || [],
     startTime: data.startTime,
     endTime: data.endTime ?? null,
     venueName: data.venueName,
@@ -151,16 +164,103 @@ export async function createEvent(data: EventFormValues): Promise<string> {
       ...t,
       soldCount: 0,
     })),
-    isFeatured: data.isFeatured,
+    isFeatured: data.isFeatured ?? false,
     status: data.status || "draft",
+    agenda: data.agenda || [],
+    faq: data.faq || [],
+    amenities: data.amenities || [],
+    audience: data.audience || [],
+    languages: data.languages || [],
+    seriesId: data.seriesId || null,
+    seriesIndex: data.seriesIndex || null,
+    seriesCount: data.seriesCount || null,
     createdAt: new Date(),
     updatedAt: new Date(),
   });
 
+  if (data.organizerId && data.status === "published") {
+    await recomputeOrganizerCounts(data.organizerId);
+  }
+
   return newDoc.id;
 }
 
-import { stripAppOwnedFields } from "./constants";
+/**
+ * Creates a series of N event drafts in a single batched write
+ */
+export async function createEventSeries(
+  data: EventFormValues,
+  occurrences: { startTime: Date; endTime: Date | null }[]
+): Promise<string[]> {
+  const batch = writeBatch(db);
+  const seriesId = `ser_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const seriesCount = occurrences.length;
+  const createdIds: string[] = [];
+
+  const derivedImageUrls =
+    data.images && data.images.length > 0
+      ? data.images.map((img) => img.sizes.l)
+      : data.imageUrls || [];
+
+  for (let i = 0; i < occurrences.length; i++) {
+    const occ = occurrences[i];
+    const docRef = doc(collection(db, "events"));
+    createdIds.push(docRef.id);
+
+    const eventPayload: Record<string, unknown> = {
+      title: data.title,
+      description: data.description ?? null,
+      images: data.images || [],
+      imageUrls: derivedImageUrls,
+      categoryId: data.categoryId,
+      tags: data.tags || [],
+      startTime: Timestamp.fromDate(occ.startTime),
+      endTime: occ.endTime ? Timestamp.fromDate(occ.endTime) : null,
+      venueName: data.venueName,
+      address: data.address ?? null,
+      organizerId: data.organizerId ?? null,
+      organizerName: data.organizerName,
+      priceMinPkr: data.priceMinPkr ?? null,
+      priceMaxPkr: data.priceMaxPkr ?? null,
+      ticketUrl: data.ticketUrl || null,
+      ticketTypes: data.ticketTypes.map((t, tIdx) => ({
+        ...t,
+        id: `ticket_${Date.now()}_${tIdx}`,
+        soldCount: 0,
+      })),
+      isFeatured: data.isFeatured ?? false,
+      status: data.status || "draft",
+      agenda: data.agenda || [],
+      faq: data.faq || [],
+      amenities: data.amenities || [],
+      audience: data.audience || [],
+      languages: data.languages || [],
+      seriesId,
+      seriesIndex: i + 1,
+      seriesCount,
+      createdAt: serverTimestamp(),
+      updatedAt: serverTimestamp(),
+    };
+
+    if (typeof data.latitude === "number" && typeof data.longitude === "number") {
+      const gp = new GeoPoint(data.latitude, data.longitude);
+      eventPayload.geo = gp;
+      eventPayload.location = gp;
+      eventPayload.latitude = data.latitude;
+      eventPayload.longitude = data.longitude;
+    }
+
+    batch.set(docRef, eventPayload);
+  }
+
+  await batch.commit();
+
+  if (data.organizerId && data.status === "published") {
+    await recomputeOrganizerCounts(data.organizerId);
+  }
+
+  return createdIds;
+}
 
 /**
  * Updates an event preserving existing soldCount on ticket types and checking concurrent edits
@@ -200,8 +300,15 @@ export async function updateEvent(
     }));
   }
 
-  // 3. Strip app-owned consumer fields
+  // 3. Strip app-owned consumer fields & protect seriesIndex/seriesCount on update
   const cleanData = stripAppOwnedFields(data as Record<string, unknown>);
+  delete cleanData.seriesIndex;
+  delete cleanData.seriesCount;
+
+  // Derive imageUrls from images if images is provided
+  if (data.images && data.images.length > 0) {
+    cleanData.imageUrls = data.images.map((i) => i.sizes.l);
+  }
 
   const updates: Record<string, unknown> = {
     ...cleanData,
@@ -322,6 +429,34 @@ export async function publishEvent(
 }
 
 /**
+ * Publish an entire series in one batched write
+ */
+export async function publishSeries(
+  seriesId: string,
+  adminUid: string,
+  organizerId?: string | null
+): Promise<void> {
+  const q = query(eventsCol, where("seriesId", "==", seriesId));
+  const snap = await getDocs(q);
+  const batch = writeBatch(db);
+
+  snap.docs.forEach((d) => {
+    batch.update(d.ref, {
+      status: "published",
+      reviewedAt: serverTimestamp(),
+      reviewedBy: adminUid,
+      updatedAt: serverTimestamp(),
+    });
+  });
+
+  await batch.commit();
+
+  if (organizerId) {
+    await recomputeOrganizerCounts(organizerId);
+  }
+}
+
+/**
  * Reject event with reason
  */
 export async function rejectEvent(
@@ -337,6 +472,31 @@ export async function rejectEvent(
     reviewedBy: adminUid,
     updatedAt: serverTimestamp(),
   });
+}
+
+/**
+ * Reject an entire series in one batched write
+ */
+export async function rejectSeries(
+  seriesId: string,
+  adminUid: string,
+  reason: string
+): Promise<void> {
+  const q = query(eventsCol, where("seriesId", "==", seriesId));
+  const snap = await getDocs(q);
+  const batch = writeBatch(db);
+
+  snap.docs.forEach((d) => {
+    batch.update(d.ref, {
+      status: "rejected",
+      rejectionReason: reason,
+      reviewedAt: serverTimestamp(),
+      reviewedBy: adminUid,
+      updatedAt: serverTimestamp(),
+    });
+  });
+
+  await batch.commit();
 }
 
 /**
@@ -400,30 +560,7 @@ export async function uploadEventImage(
     );
   });
 
-  const originalUrl = await getDownloadURL(storageRef);
-
-  // Poll for resized _800x800 variant if Image Resizer extension is configured
-  const resizedPath = `events/${eventId}/${imageId}_800x800.jpg`;
-  const resizedRef = ref(storage, resizedPath);
-
-  const pollResized = async (): Promise<string> => {
-    for (let attempt = 0; attempt < 5; attempt++) {
-      try {
-        await new Promise((res) => setTimeout(res, 1200));
-        const resizedUrl = await getDownloadURL(resizedRef);
-        if (resizedUrl) return resizedUrl;
-      } catch {
-        // Still processing or extension not installed
-      }
-    }
-    return originalUrl;
-  };
-
-  try {
-    return await pollResized();
-  } catch {
-    return originalUrl;
-  }
+  return await getDownloadURL(storageRef);
 }
 
 /**
@@ -449,6 +586,7 @@ export async function duplicateEvent(
     id: "",
     title: options?.newTitle || `${source.title} (Copy)`,
     description: source.description,
+    images: keepImages ? source.images || [] : [],
     imageUrls: keepImages ? source.imageUrls : [],
     categoryId: source.categoryId,
     tags: source.tags,
@@ -466,6 +604,14 @@ export async function duplicateEvent(
     ticketTypes: duplicatedTickets,
     isFeatured: false,
     status: "draft",
+    agenda: source.agenda || [],
+    faq: source.faq || [],
+    amenities: source.amenities || [],
+    audience: source.audience || [],
+    languages: source.languages || [],
+    seriesId: null,
+    seriesIndex: null,
+    seriesCount: null,
     mapImageUrl: null,
     createdAt: new Date(),
     updatedAt: new Date(),

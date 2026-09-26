@@ -15,10 +15,61 @@ export interface TicketType {
   maxPerPerson?: number;
 }
 
+export interface EventImageSizes {
+  s: string; // <= 400px long edge - thumbnails
+  m: string; // <= 800px
+  l: string; // <= 1600px - cards, detail, story
+}
+
+export interface EventImage {
+  id: string; // uuid
+  path: string; // storage path
+  sizes: EventImageSizes;
+  w: number; // processed width, px
+  h: number; // processed height, px
+  focalX: number; // 0–1, left -> right
+  focalY: number; // 0–1, top -> bottom
+  fit: 'fill' | 'fit';
+  bg: string; // '#RRGGBB' dominant color
+  alt?: string | null; // accessibility description <= 200
+}
+
+export interface AgendaItem {
+  id: string;
+  time: string; // 'HH:mm' PKT wall-clock
+  dayOffset: number; // 0 = start day, 1 = next day...
+  title: string; // <= 80
+  host?: string | null; // <= 60
+  note?: string | null; // <= 200
+}
+
+export interface FaqItem {
+  id: string;
+  q: string; // <= 120
+  a: string; // <= 600
+}
+
+export type AmenityId =
+  | 'parking'
+  | 'food'
+  | 'free_water'
+  | 'prayer_space'
+  | 'washrooms'
+  | 'family_friendly'
+  | 'wheelchair'
+  | 'indoor'
+  | 'outdoor'
+  | 'wifi';
+
+export type AudienceId = 'students' | 'women' | 'families' | 'adults';
+
+export type LanguageId = 'ur' | 'en' | 'pa' | 'ps' | 'sd' | 'other';
+
 export interface Event {
   id: string;
   title: string;
   description: string | null;
+  images: EventImage[];
   imageUrls: string[];
   categoryId: string;
   tags: string[];
@@ -36,6 +87,14 @@ export interface Event {
   ticketTypes: TicketType[];
   isFeatured: boolean;
   status: EventStatus;
+  agenda?: AgendaItem[];
+  faq?: FaqItem[];
+  amenities?: string[];
+  audience?: string[];
+  languages?: string[];
+  seriesId?: string | null;
+  seriesIndex?: number | null;
+  seriesCount?: number | null;
   soldCount?: number;
   capacity?: number;
   mapImageUrl?: string | null;

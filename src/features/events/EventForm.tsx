@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useMemo, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
@@ -8,36 +8,42 @@ import { qk } from "@/lib/queryKeys";
 import { fetchOrganizers } from "@/features/organizers/api";
 import {
   createEvent,
+  createEventSeries,
   updateEvent,
   publishEvent,
-  uploadEventImage,
   cancelEvent,
   postponeEvent,
   deleteEvent,
+  duplicateEvent,
 } from "./api";
-import { eventSchema, EventFormValues, TicketTypeFormValues } from "./schema";
+import { eventSchemaV2, EventFormValues, TicketTypeFormValues } from "./schema";
 import { pktToDate, dateToPktParts, pktLabel } from "@/lib/pkt";
 import { formatPKR } from "@/lib/utils";
-import { parseMapsInput, MAPS_FAILURE_MESSAGES } from "@/lib/maps";
-import { PhoneFrame } from "@/components/preview/PhoneFrame";
-import {
-  PublishConfirmModal,
-  getPublishGateMissingItems,
-} from "./PublishGateModal";
+import { parseMapsInput } from "@/lib/maps";
+import { useAuth } from "@/features/auth/AuthContext";
+import type { Event, EventImage, TicketType, Organizer } from "@/types";
+
+// Subcomponents
+import { SectionNav, FormSectionStatus } from "@/components/event-form/SectionNav";
+import { ImageManager } from "@/components/event-form/ImageManager";
+import { ChipGroup } from "@/components/event-form/ChipGroup";
+import { AgendaTable } from "@/components/event-form/AgendaTable";
+import { FaqList } from "@/components/event-form/FaqList";
+import { RepeatModal, SeriesOccurrence } from "@/components/event-form/RepeatModal";
+import { PhonePreview } from "@/components/event-form/PhonePreview";
+import { EventChecklist } from "@/components/event-form/EventChecklist";
+import { PublishConfirmModal } from "./PublishGateModal";
 import { CancelEventModal } from "./CancelEventModal";
 import { PostponeEventModal } from "./PostponeEventModal";
 import { DeleteEventModal } from "./DeleteEventModal";
-import { MultiImageManager } from "./MultiImageManager";
-import { useAuth } from "@/features/auth/AuthContext";
+import { DuplicateModal } from "./DuplicateModal";
 
+// UI Components
 import { Button } from "@/components/ui/Button";
 import { Input } from "@/components/ui/Input";
 import { Textarea } from "@/components/ui/Textarea";
 import { Select } from "@/components/ui/Select";
 import { Switch } from "@/components/ui/Switch";
-import { Card, CardHeader, CardTitle, CardDescription } from "@/components/ui/Card";
-import type { Event, TicketType } from "@/types";
-
 import {
   ArrowLeft,
   Save,
@@ -56,88 +62,86 @@ import {
   AlertTriangle,
   XCircle,
   Users,
+  Repeat,
+  RotateCcw,
 } from "lucide-react";
 import { toast } from "sonner";
 
 export interface EventFormProps {
-  initialData?: Event | null;
+  initialEvent?: Event | null;
+  onSuccess?: (id: string) => void;
 }
 
 const CATEGORIES = [
   { value: "music", label: "Music & Concerts" },
-  { value: "tech", label: "Technology & Startups" },
   { value: "arts", label: "Arts & Culture" },
+  { value: "food", label: "Food & Drinks" },
   { value: "sports", label: "Sports & Fitness" },
-  { value: "food", label: "Food & Festivals" },
+  { value: "tech", label: "Tech & Workshops" },
   { value: "business", label: "Business & Networking" },
-  { value: "community", label: "Community & Charity" },
-  { value: "education", label: "Workshops & Education" },
+  { value: "community", label: "Community & Social" },
+  { value: "outdoors", label: "Outdoors & Travel" },
+  { value: "other", label: "Other" },
 ];
 
-export function EventForm({ initialData }: EventFormProps) {
+export function EventForm({ initialEvent, onSuccess }: EventFormProps) {
   const router = useRouter();
   const queryClient = useQueryClient();
   const { authState } = useAuth();
-  const isEditing = Boolean(initialData?.id);
+  const adminUid = authState.status === "authenticated" ? authState.uid : "admin";
+  const isEditing = Boolean(initialEvent?.id);
+  const eventId = initialEvent?.id || "new";
+  const draftKey = `admin_event_draft_${eventId}`;
 
-  // Organizers query
-  const { data: organizers = [] } = useQuery({
-    queryKey: qk.organizers.all,
-    queryFn: fetchOrganizers,
-  });
-
-  // Form states
-  const [title, setTitle] = useState(initialData?.title || "");
-  const [description, setDescription] = useState(initialData?.description || "");
-  const [categoryId, setCategoryId] = useState(initialData?.categoryId || "music");
+  // Form State
+  const [title, setTitle] = useState(initialEvent?.title || "");
+  const [description, setDescription] = useState(initialEvent?.description || "");
+  const [categoryId, setCategoryId] = useState(initialEvent?.categoryId || "community");
+  const [tags, setTags] = useState<string[]>(initialEvent?.tags || []);
   const [tagInput, setTagInput] = useState("");
-  const [tags, setTags] = useState<string[]>(initialData?.tags || []);
-  const [imageUrls, setImageUrls] = useState<string[]>(initialData?.imageUrls || []);
-
-  // Timezone-safe start and end values in PKT
-  const initialStartParts = dateToPktParts(initialData?.startTime);
-  const [startDateStr, setStartDateStr] = useState(initialStartParts.date);
-  const [startTimeStr, setStartTimeStr] = useState(initialStartParts.time);
-
-  const initialEndParts = dateToPktParts(initialData?.endTime);
-  const [hasEndTime, setHasEndTime] = useState(Boolean(initialData?.endTime));
-  const [endDateStr, setEndDateStr] = useState(
-    initialData?.endTime ? initialEndParts.date : initialStartParts.date
-  );
-  const [endTimeStr, setEndTimeStr] = useState(
-    initialData?.endTime ? initialEndParts.time : "22:00"
-  );
-
-  // Computed Date objects using strictly pkt.ts
-  const computedStartTime = pktToDate(startDateStr, startTimeStr);
-  const computedEndTime = hasEndTime ? pktToDate(endDateStr, endTimeStr) : null;
-
-  // Venue & Coordinates
-  const [venueName, setVenueName] = useState(initialData?.venueName || "");
-  const [address, setAddress] = useState(initialData?.address || "");
-  const [latitude, setLatitude] = useState<number | null>(initialData?.latitude ?? null);
-  const [longitude, setLongitude] = useState<number | null>(initialData?.longitude ?? null);
-  const [mapsInput, setMapsInput] = useState("");
-  const [mapsError, setMapsError] = useState<string | null>(null);
+  const [isFeatured, setIsFeatured] = useState(initialEvent?.isFeatured || false);
 
   // Organizer
-  const [organizerId, setOrganizerId] = useState<string>(initialData?.organizerId || "");
-  const [organizerName, setOrganizerName] = useState<string>(
-    initialData?.organizerName || ""
+  const [organizerId, setOrganizerId] = useState<string | null>(initialEvent?.organizerId || null);
+  const [organizerName, setOrganizerName] = useState(initialEvent?.organizerName || "");
+
+  // Date & Time in PKT
+  const defaultPktStart = useMemo(
+    () => (initialEvent?.startTime ? dateToPktParts(initialEvent.startTime) : { date: "", time: "19:00" }),
+    [initialEvent?.startTime]
+  );
+  const defaultPktEnd = useMemo(
+    () => (initialEvent?.endTime ? dateToPktParts(initialEvent.endTime) : { date: "", time: "22:00" }),
+    [initialEvent?.endTime]
   );
 
-  // Tickets & Attendance metrics
-  const totalExistingSold =
-    initialData?.soldCount ??
-    (initialData?.ticketTypes?.reduce((acc, t) => acc + (t.soldCount || 0), 0) ?? 0);
+  const [startDateStr, setStartDateStr] = useState(defaultPktStart.date);
+  const [startTimeStr, setStartTimeStr] = useState(defaultPktStart.time);
+  const [endDateStr, setEndDateStr] = useState(defaultPktEnd.date);
+  const [endTimeStr, setEndTimeStr] = useState(defaultPktEnd.time);
 
-  const [isFreeEvent, setIsFreeEvent] = useState(
-    initialData?.priceMinPkr === 0 || (!initialData?.priceMinPkr && !initialData?.priceMaxPkr)
-  );
-  const [ticketUrl, setTicketUrl] = useState(initialData?.ticketUrl || "");
-  const [ticketTypes, setTicketTypes] = useState<TicketType[]>(
-    initialData?.ticketTypes && initialData.ticketTypes.length > 0
-      ? initialData.ticketTypes
+  // Venue & Location
+  const [venueName, setVenueName] = useState(initialEvent?.venueName || "");
+  const [address, setAddress] = useState(initialEvent?.address || "");
+  const [mapsInput, setMapsInput] = useState("");
+  const [latitude, setLatitude] = useState<number | null>(initialEvent?.latitude ?? null);
+  const [longitude, setLongitude] = useState<number | null>(initialEvent?.longitude ?? null);
+
+  // Images v2
+  const [images, setImages] = useState<EventImage[]>(initialEvent?.images || []);
+  const [isUploadingImages, setIsUploadingImages] = useState(false);
+
+  // Tickets
+  const [ticketTypes, setTicketTypes] = useState<TicketTypeFormValues[]>(
+    initialEvent?.ticketTypes?.length
+      ? initialEvent.ticketTypes.map((t) => ({
+          id: t.id,
+          name: t.name,
+          pricePkr: t.pricePkr,
+          capacity: t.capacity,
+          soldCount: t.soldCount || 0,
+          maxPerPerson: t.maxPerPerson || 10,
+        }))
       : [
           {
             id: `ticket_${Date.now()}`,
@@ -145,922 +149,1180 @@ export function EventForm({ initialData }: EventFormProps) {
             pricePkr: 0,
             capacity: 100,
             soldCount: 0,
+            maxPerPerson: 10,
           },
         ]
   );
+  const [ticketUrl, setTicketUrl] = useState(initialEvent?.ticketUrl || "");
 
-  // Visibility & Status
-  const [isFeatured, setIsFeatured] = useState(initialData?.isFeatured || false);
-  const [status, setStatus] = useState(initialData?.status || "draft");
+  // Details v2 (Audience, Languages, Amenities, Agenda, FAQ)
+  const [audience, setAudience] = useState<string[]>(initialEvent?.audience || []);
+  const [languages, setLanguages] = useState<string[]>(initialEvent?.languages || ["ur", "en"]);
+  const [amenities, setAmenities] = useState<string[]>(initialEvent?.amenities || []);
+  const [agenda, setAgenda] = useState(initialEvent?.agenda || []);
+  const [faq, setFaq] = useState(initialEvent?.faq || []);
 
-  // Save & Lifecycle modals states
-  const [isSavingDraft, setIsSavingDraft] = useState(false);
+  // Series / Repeat
+  const [seriesOccurrences, setSeriesOccurrences] = useState<SeriesOccurrence[]>([]);
+  const [isRepeatModalOpen, setIsRepeatModalOpen] = useState(false);
+
+  // Validation errors
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const [isPublishModalOpen, setIsPublishModalOpen] = useState(false);
-  const [isPublishing, setIsPublishing] = useState(false);
+
+  // Modal actions
   const [isCancelModalOpen, setIsCancelModalOpen] = useState(false);
-  const [isCancelling, setIsCancelling] = useState(false);
   const [isPostponeModalOpen, setIsPostponeModalOpen] = useState(false);
-  const [isPostponing, setIsPostponing] = useState(false);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
-  const [isDeleting, setIsDeleting] = useState(false);
+  const [isDuplicateModalOpen, setIsDuplicateModalOpen] = useState(false);
+
+  // Autosave status
   const [lastSavedTime, setLastSavedTime] = useState<string | null>(null);
+  const [hasRestorableDraft, setHasRestorableDraft] = useState(false);
 
-  // Sync organizerName when organizerId changes
-  useEffect(() => {
-    if (organizerId) {
-      const selected = organizers.find((o) => o.id === organizerId);
-      if (selected) {
-        setOrganizerName(selected.name);
-      }
-    }
-  }, [organizerId, organizers]);
+  // Organizers query
+  const { data: organizers = [] } = useQuery<Organizer[]>({
+    queryKey: qk.organizers.all,
+    queryFn: fetchOrganizers,
+  });
 
-  // Handle Google Maps link / coordinates paste
-  const handleMapsInputChange = (text: string) => {
-    setMapsInput(text);
-    if (!text.trim()) {
-      setMapsError(null);
-      return;
+  // Compute startDate & endDate Date objects
+  const computedStartTime = useMemo(() => {
+    if (!startDateStr || !startTimeStr) return null;
+    try {
+      return pktToDate(startDateStr, startTimeStr);
+    } catch {
+      return null;
     }
-    const result = parseMapsInput(text);
-    if (result.ok) {
-      setLatitude(result.lat);
-      setLongitude(result.lng);
-      setMapsError(null);
-      toast.success(`Coordinates extracted: ${result.lat.toFixed(5)}, ${result.lng.toFixed(5)}`);
-    } else {
-      setMapsError(MAPS_FAILURE_MESSAGES[result.reason]);
+  }, [startDateStr, startTimeStr]);
+
+  const computedEndTime = useMemo(() => {
+    if (!endDateStr || !endTimeStr) return null;
+    try {
+      return pktToDate(endDateStr, endTimeStr);
+    } catch {
+      return null;
+    }
+  }, [endDateStr, endTimeStr]);
+
+  // Compute priceMinPkr and priceMaxPkr from ticketTypes
+  const priceMinPkr = useMemo(() => {
+    if (!ticketTypes || ticketTypes.length === 0) return 0;
+    return Math.min(...ticketTypes.map((t) => t.pricePkr));
+  }, [ticketTypes]);
+
+  const priceMaxPkr = useMemo(() => {
+    if (!ticketTypes || ticketTypes.length === 0) return 0;
+    return Math.max(...ticketTypes.map((t) => t.pricePkr));
+  }, [ticketTypes]);
+
+  // Handle Maps link parsing
+  const handleMapsInputChange = (val: string) => {
+    setMapsInput(val);
+    if (!val.trim()) return;
+    const parsed = parseMapsInput(val);
+    if (parsed.ok) {
+      setLatitude(parsed.lat);
+      setLongitude(parsed.lng);
+      toast.success("Location coordinates extracted from Google Maps link!");
     }
   };
 
-  // Ticket types helpers
-  const handleAddTicketType = () => {
-    setTicketTypes((prev) => [
-      ...prev,
+  // Build form values object for preview & validation
+  const currentFormValues = useMemo<Partial<EventFormValues>>(() => {
+    return {
+      title,
+      description: description || null,
+      images,
+      imageUrls: images.map((i) => i.sizes.l),
+      categoryId,
+      tags,
+      startTime: computedStartTime || (initialEvent?.startTime ?? undefined),
+      endTime: computedEndTime ?? null,
+      venueName,
+      address: address || null,
+      latitude,
+      longitude,
+      organizerId,
+      organizerName: organizerName || "Organizer",
+      priceMinPkr,
+      priceMaxPkr,
+      ticketUrl: ticketUrl || null,
+      ticketTypes,
+      isFeatured,
+      status: initialEvent?.status || "draft",
+      agenda,
+      faq,
+      amenities,
+      audience,
+      languages,
+      seriesId: initialEvent?.seriesId || null,
+      seriesIndex: initialEvent?.seriesIndex || null,
+      seriesCount: initialEvent?.seriesCount || null,
+    };
+  }, [
+    title,
+    description,
+    images,
+    categoryId,
+    tags,
+    computedStartTime,
+    computedEndTime,
+    venueName,
+    address,
+    latitude,
+    longitude,
+    organizerId,
+    organizerName,
+    priceMinPkr,
+    priceMaxPkr,
+    ticketUrl,
+    ticketTypes,
+    isFeatured,
+    initialEvent,
+    agenda,
+    faq,
+    amenities,
+    audience,
+    languages,
+  ]);
+
+  // Section Status calculation
+  const sections: FormSectionStatus[] = useMemo(() => {
+    const basicsHasError = Boolean(errors.title || errors.description || errors.categoryId);
+    const basicsComplete = Boolean(title.trim() && categoryId && organizerName.trim());
+
+    const whenWhereHasError = Boolean(errors.startTime || errors.endTime || errors.venueName || errors.latitude);
+    const whenWhereComplete = Boolean(computedStartTime && venueName.trim());
+
+    const imagesHasError = Boolean(errors.images);
+    const imagesComplete = images.length > 0 && !isUploadingImages;
+
+    const ticketsHasError = Boolean(errors.ticketUrl || errors.ticketTypes || errors.priceMaxPkr);
+    const ticketsComplete = ticketTypes.length > 0 && (priceMinPkr === 0 || Boolean(ticketUrl));
+
+    const detailsHasError = Boolean(errors.agenda || errors.faq);
+    const detailsComplete = agenda.length > 0 || faq.length > 0 || amenities.length > 0;
+
+    return [
       {
-        id: `ticket_${Date.now()}_${prev.length}`,
-        name: "VIP Pass",
-        pricePkr: isFreeEvent ? 0 : 2000,
+        id: "section-basics",
+        label: "Basics",
+        status: basicsHasError ? "error" : basicsComplete ? "complete" : "untouched",
+      },
+      {
+        id: "section-when-where",
+        label: "When & where",
+        status: whenWhereHasError ? "error" : whenWhereComplete ? "complete" : "untouched",
+      },
+      {
+        id: "section-images",
+        label: "Images",
+        status: imagesHasError ? "error" : imagesComplete ? "complete" : "untouched",
+      },
+      {
+        id: "section-tickets",
+        label: "Tickets",
+        status: ticketsHasError ? "error" : ticketsComplete ? "complete" : "untouched",
+      },
+      {
+        id: "section-details",
+        label: "Details",
+        isOptional: true,
+        status: detailsHasError ? "error" : detailsComplete ? "complete" : "untouched",
+      },
+    ];
+  }, [
+    errors,
+    title,
+    categoryId,
+    organizerName,
+    computedStartTime,
+    venueName,
+    images.length,
+    isUploadingImages,
+    ticketTypes,
+    priceMinPkr,
+    ticketUrl,
+    agenda.length,
+    faq.length,
+    amenities.length,
+  ]);
+
+  // Autosave to localStorage debounced 1.5s
+  useEffect(() => {
+    if (isEditing) return; // Autosave drafts for new events
+    const timer = setTimeout(() => {
+      try {
+        const payload = {
+          title,
+          description,
+          categoryId,
+          tags,
+          startDateStr,
+          startTimeStr,
+          endDateStr,
+          endTimeStr,
+          venueName,
+          address,
+          latitude,
+          longitude,
+          organizerId,
+          organizerName,
+          ticketTypes,
+          ticketUrl,
+          audience,
+          languages,
+          amenities,
+          agenda,
+          faq,
+        };
+        localStorage.setItem(draftKey, JSON.stringify(payload));
+        const now = new Date();
+        setLastSavedTime(
+          now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+        );
+      } catch {}
+    }, 1500);
+
+    return () => clearTimeout(timer);
+  }, [
+    title,
+    description,
+    categoryId,
+    tags,
+    startDateStr,
+    startTimeStr,
+    endDateStr,
+    endTimeStr,
+    venueName,
+    address,
+    latitude,
+    longitude,
+    organizerId,
+    organizerName,
+    ticketTypes,
+    ticketUrl,
+    audience,
+    languages,
+    amenities,
+    agenda,
+    faq,
+    isEditing,
+    draftKey,
+  ]);
+
+  // Check for restorable draft on mount
+  useEffect(() => {
+    if (isEditing) return;
+    try {
+      const saved = localStorage.getItem(draftKey);
+      if (saved) {
+        setHasRestorableDraft(true);
+      }
+    } catch {}
+  }, [isEditing, draftKey]);
+
+  const restoreDraft = () => {
+    try {
+      const saved = localStorage.getItem(draftKey);
+      if (!saved) return;
+      const data = JSON.parse(saved);
+      if (data.title) setTitle(data.title);
+      if (data.description) setDescription(data.description);
+      if (data.categoryId) setCategoryId(data.categoryId);
+      if (data.tags) setTags(data.tags);
+      if (data.startDateStr) setStartDateStr(data.startDateStr);
+      if (data.startTimeStr) setStartTimeStr(data.startTimeStr);
+      if (data.endDateStr) setEndDateStr(data.endDateStr);
+      if (data.endTimeStr) setEndTimeStr(data.endTimeStr);
+      if (data.venueName) setVenueName(data.venueName);
+      if (data.address) setAddress(data.address);
+      if (typeof data.latitude === "number") setLatitude(data.latitude);
+      if (typeof data.longitude === "number") setLongitude(data.longitude);
+      if (data.organizerId) setOrganizerId(data.organizerId);
+      if (data.organizerName) setOrganizerName(data.organizerName);
+      if (data.ticketTypes) setTicketTypes(data.ticketTypes);
+      if (data.ticketUrl) setTicketUrl(data.ticketUrl);
+      if (data.audience) setAudience(data.audience);
+      if (data.languages) setLanguages(data.languages);
+      if (data.amenities) setAmenities(data.amenities);
+      if (data.agenda) setAgenda(data.agenda);
+      if (data.faq) setFaq(data.faq);
+      setHasRestorableDraft(false);
+      toast.success("Draft restored from local cache");
+    } catch {
+      toast.error("Failed to restore draft");
+    }
+  };
+
+  const discardDraft = () => {
+    try {
+      localStorage.removeItem(draftKey);
+      setHasRestorableDraft(false);
+      toast.info("Local draft discarded");
+    } catch {}
+  };
+
+  // Add Tag
+  const handleAddTag = () => {
+    const trimmed = tagInput.trim().replace(/^#/, "");
+    if (!trimmed) return;
+    if (tags.length >= 8) {
+      toast.error("Up to 8 tags");
+      return;
+    }
+    if (trimmed.length > 24) {
+      toast.error("Tag must be under 24 characters");
+      return;
+    }
+    if (!tags.includes(trimmed)) {
+      setTags([...tags, trimmed]);
+    }
+    setTagInput("");
+  };
+
+  const handleRemoveTag = (t: string) => {
+    setTags(tags.filter((x) => x !== t));
+  };
+
+  // Validate entire form against schema
+  const validateForm = (allowDraft = false) => {
+    setErrors({});
+    if (isUploadingImages) {
+      toast.error("Wait for images to finish uploading");
+      return null;
+    }
+
+    const payload: Partial<EventFormValues> = {
+      ...currentFormValues,
+      priceMinPkr,
+      priceMaxPkr,
+    };
+
+    if (allowDraft) {
+      // Relaxed validation for draft saves
+      if (!payload.title?.trim()) {
+        setErrors({ title: "Add a title" });
+        toast.error("Add a title to save a draft");
+        return null;
+      }
+      return payload as EventFormValues;
+    }
+
+    const result = eventSchemaV2.safeParse(payload);
+    if (!result.success) {
+      const fieldErrors: Record<string, string> = {};
+      result.error.errors.forEach((err) => {
+        const path = err.path.join(".");
+        fieldErrors[path] = err.message;
+      });
+      setErrors(fieldErrors);
+      const firstErrorMessage = result.error.errors[0]?.message || "Please fix validation errors";
+      toast.error(firstErrorMessage);
+      return null;
+    }
+
+    return result.data;
+  };
+
+  // Save Draft Handler
+  const handleSaveDraft = async () => {
+    const validData = validateForm(true);
+    if (!validData) return;
+
+    try {
+      setIsSubmitting(true);
+      const payload: EventFormValues = {
+        ...validData,
+        status: initialEvent?.status || "draft",
+      };
+
+      if (isEditing && initialEvent?.id) {
+        await updateEvent(initialEvent.id, payload, initialEvent);
+        toast.success("Draft saved successfully");
+        queryClient.invalidateQueries({ queryKey: qk.events.detail(initialEvent.id) });
+      } else {
+        if (seriesOccurrences.length > 1) {
+          // Series create
+          const occs = seriesOccurrences.map((o) => ({
+            startTime: o.startTime,
+            endTime: o.endTime,
+          }));
+          const ids = await createEventSeries(payload, occs);
+          toast.success(`Created series of ${ids.length} event drafts!`);
+          localStorage.removeItem(draftKey);
+          router.push("/events");
+          return;
+        }
+
+        const newId = await createEvent(payload);
+        toast.success("Event created as draft");
+        localStorage.removeItem(draftKey);
+        router.push(`/events/${newId}`);
+      }
+    } catch (err: any) {
+      console.error("Save draft error:", err);
+      toast.error(err.message || "Failed to save draft");
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  // Publish / Submit Handler
+  const handlePublishSubmit = async () => {
+    const validData = validateForm(false);
+    if (!validData) return;
+
+    try {
+      setIsSubmitting(true);
+
+      if (isEditing && initialEvent?.id) {
+        await updateEvent(initialEvent.id, { ...validData, status: "published" }, initialEvent);
+        await publishEvent(initialEvent.id, adminUid, validData.organizerId);
+        toast.success("Event published successfully!");
+        queryClient.invalidateQueries({ queryKey: qk.events.all });
+        router.push("/events");
+      } else {
+        if (seriesOccurrences.length > 1) {
+          const occs = seriesOccurrences.map((o) => ({
+            startTime: o.startTime,
+            endTime: o.endTime,
+          }));
+          const payload: EventFormValues = { ...validData, status: "published" };
+          const ids = await createEventSeries(payload, occs);
+          toast.success(`Created and published series of ${ids.length} events!`);
+          localStorage.removeItem(draftKey);
+          router.push("/events");
+          return;
+        }
+
+        const payload: EventFormValues = { ...validData, status: "published" };
+        const newId = await createEvent(payload);
+        await publishEvent(newId, adminUid, payload.organizerId);
+        toast.success("Event published successfully!");
+        localStorage.removeItem(draftKey);
+        router.push("/events");
+      }
+    } catch (err: any) {
+      console.error("Publish error:", err);
+      toast.error(err.message || "Failed to publish event");
+    } finally {
+      setIsSubmitting(false);
+      setIsPublishModalOpen(false);
+    }
+  };
+
+  // Ticket builders
+  const addTicketType = () => {
+    setTicketTypes([
+      ...ticketTypes,
+      {
+        id: `ticket_${Date.now()}`,
+        name: "Standard Ticket",
+        pricePkr: 1500,
         capacity: 50,
         soldCount: 0,
+        maxPerPerson: 5,
       },
     ]);
   };
 
-  const handleRemoveTicketType = (id: string) => {
+  const updateTicketType = (id: string, updates: Partial<TicketTypeFormValues>) => {
+    setTicketTypes(ticketTypes.map((t) => (t.id === id ? { ...t, ...updates } : t)));
+  };
+
+  const removeTicketType = (id: string) => {
     if (ticketTypes.length <= 1) {
-      toast.error("At least one ticket type is required.");
+      toast.error("At least one ticket type is required");
       return;
     }
-    const target = ticketTypes.find((t) => t.id === id);
-    if (target && (target.soldCount || 0) > 0) {
-      toast.error(`Cannot delete ticket "${target.name}": ${target.soldCount} tickets have already been sold.`);
-      return;
-    }
-    setTicketTypes((prev) => prev.filter((t) => t.id !== id));
-  };
-
-  const handleUpdateTicketType = (
-    id: string,
-    field: keyof TicketType,
-    value: string | number
-  ) => {
-    setTicketTypes((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, [field]: value } : t))
-    );
-  };
-
-  // Tags handler
-  const handleAddTag = () => {
-    if (!tagInput.trim()) return;
-    const clean = tagInput.trim().toLowerCase();
-    if (tags.includes(clean)) return;
-    if (tags.length >= 8) {
-      toast.error("Maximum 8 tags allowed.");
-      return;
-    }
-    setTags([...tags, clean]);
-    setTagInput("");
-  };
-
-  const handleRemoveTag = (tag: string) => {
-    setTags(tags.filter((t) => t !== tag));
-  };
-
-  // Compute prices
-  const minPrice = isFreeEvent
-    ? 0
-    : Math.min(...ticketTypes.map((t) => t.pricePkr || 0));
-  const maxPrice = isFreeEvent
-    ? 0
-    : Math.max(...ticketTypes.map((t) => t.pricePkr || 0));
-
-  // Current Form Data Snapshot
-  const currentFormData: EventFormValues = {
-    title,
-    description: description || null,
-    imageUrls,
-    categoryId,
-    tags,
-    startTime: computedStartTime,
-    endTime: computedEndTime,
-    venueName,
-    address: address || null,
-    latitude: latitude || null,
-    longitude: longitude || null,
-    organizerId: organizerId || null,
-    organizerName: organizerName || "Organizer",
-    priceMinPkr: minPrice,
-    priceMaxPkr: maxPrice,
-    ticketUrl: isFreeEvent ? null : ticketUrl || null,
-    ticketTypes,
-    isFeatured,
-    status,
-  };
-
-  // Publish gate check
-  const missingPublishItems = getPublishGateMissingItems(currentFormData);
-  const isPublishAllowed = missingPublishItems.length === 0;
-
-  // Save Draft handler
-  const handleSaveDraft = async () => {
-    setIsSavingDraft(true);
-    try {
-      const draftData: EventFormValues = {
-        ...currentFormData,
-        status: status === "published" ? "published" : "draft",
-      };
-
-      if (isEditing && initialData) {
-        await updateEvent(initialData.id, draftData, initialData);
-        toast.success("Changes saved!");
-      } else {
-        const newId = await createEvent(draftData);
-        toast.success("Draft event created!");
-        router.push(`/events/${newId}`);
-        return;
-      }
-      queryClient.invalidateQueries({ queryKey: qk.events.all });
-      setLastSavedTime(new Date().toLocaleTimeString());
-    } catch (err: unknown) {
-      console.error("Save draft error:", err);
-      toast.error(err instanceof Error ? err.message : "Failed to save draft. Check permissions or fields.");
-    } finally {
-      setIsSavingDraft(false);
-    }
-  };
-
-  // Publish handler
-  const handleConfirmPublish = async ({
-    skipNotification,
-  }: {
-    skipNotification: boolean;
-  }) => {
-    setIsPublishing(true);
-    try {
-      const adminUid = authState.status === "authenticated" ? authState.uid : "admin";
-
-      let targetId = initialData?.id;
-      if (!isEditing || !targetId) {
-        // Save first then publish
-        targetId = await createEvent({
-          ...currentFormData,
-          status: "published",
-        });
-      } else {
-        await updateEvent(
-          targetId,
-          {
-            ...currentFormData,
-            status: "published",
-          },
-          initialData
-        );
-      }
-
-      await publishEvent(targetId, adminUid, organizerId);
-      setStatus("published");
-      setIsPublishModalOpen(false);
-      queryClient.invalidateQueries({ queryKey: qk.events.all });
-      toast.success(
-        skipNotification
-          ? "Event published quietly (no notifications sent)."
-          : "Event published live with notifications broadcast!"
-      );
-      router.push("/events");
-    } catch (err) {
-      console.error("Publishing error:", err);
-      toast.error(err instanceof Error ? err.message : "Failed to publish event.");
-    } finally {
-      setIsPublishing(false);
-    }
-  };
-
-  // Cancel handler
-  const handleConfirmCancel = async (reason: string) => {
-    if (!initialData?.id) return;
-    try {
-      setIsCancelling(true);
-      await cancelEvent(initialData.id, reason, organizerId);
-      setStatus("cancelled");
-      setIsCancelModalOpen(false);
-      queryClient.invalidateQueries({ queryKey: qk.events.all });
-      toast.success("Event has been cancelled.");
-    } catch (err) {
-      console.error("Cancel error:", err);
-      toast.error(err instanceof Error ? err.message : "Failed to cancel event.");
-    } finally {
-      setIsCancelling(false);
-    }
-  };
-
-  // Postpone handler
-  const handleConfirmPostpone = async (data: {
-    newStartTime?: Date | null;
-    newEndTime?: Date | null;
-    reason?: string;
-  }) => {
-    if (!initialData?.id) return;
-    try {
-      setIsPostponing(true);
-      await postponeEvent(initialData.id, data, organizerId);
-      setStatus("postponed");
-      if (data.newStartTime) {
-        const parts = dateToPktParts(data.newStartTime);
-        setStartDateStr(parts.date);
-        setStartTimeStr(parts.time);
-      }
-      if (data.newEndTime) {
-        const parts = dateToPktParts(data.newEndTime);
-        setEndDateStr(parts.date);
-        setEndTimeStr(parts.time);
-        setHasEndTime(true);
-      }
-      setIsPostponeModalOpen(false);
-      queryClient.invalidateQueries({ queryKey: qk.events.all });
-      toast.success("Event postponed successfully.");
-    } catch (err) {
-      console.error("Postpone error:", err);
-      toast.error(err instanceof Error ? err.message : "Failed to postpone event.");
-    } finally {
-      setIsPostponing(false);
-    }
-  };
-
-  // Delete handler
-  const handleConfirmDelete = async () => {
-    if (!initialData?.id) return;
-    try {
-      setIsDeleting(true);
-      await deleteEvent(initialData.id, organizerId);
-      setIsDeleteModalOpen(false);
-      queryClient.invalidateQueries({ queryKey: qk.events.all });
-      toast.success("Event deleted permanently.");
-      router.push("/events");
-    } catch (err) {
-      console.error("Delete error:", err);
-      toast.error(err instanceof Error ? err.message : "Failed to delete event.");
-    } finally {
-      setIsDeleting(false);
-    }
+    setTicketTypes(ticketTypes.filter((t) => t.id !== id));
   };
 
   return (
-    <div className="flex flex-col gap-6 pb-24">
-      {/* Top navigation header & Lifecycle bar */}
-      <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-        <Link
-          href="/events"
-          className="inline-flex items-center gap-1.5 text-xs text-ink-muted hover:text-ink transition-colors font-medium"
-        >
-          <ArrowLeft className="w-3.5 h-3.5" />
-          Back to Events
-        </Link>
-
-        <div className="flex flex-wrap items-center gap-2">
-          {initialData?.id && (
-            <Link
-              href={`/events/${initialData.id}/registrations`}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-semibold bg-surface border border-border text-ink hover:bg-surface-subtle transition-colors shadow-xs"
-            >
-              <Users className="w-3.5 h-3.5 text-accent-deep" />
-              <span>Registrations ({totalExistingSold})</span>
-            </Link>
-          )}
-
-          {initialData?.id && status !== "cancelled" && (
-            <>
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={() => setIsPostponeModalOpen(true)}
-              >
-                <Clock className="w-3.5 h-3.5" />
-                Postpone
-              </Button>
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                onClick={() => setIsCancelModalOpen(true)}
-              >
-                <XCircle className="w-3.5 h-3.5 text-crimson" />
-                Cancel Event
-              </Button>
-            </>
-          )}
-
-          {initialData?.id && (
-            <Button
-              type="button"
-              variant="destructive"
-              size="sm"
-              onClick={() => setIsDeleteModalOpen(true)}
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              Delete
+    <div className="flex flex-col gap-6 font-sans">
+      {/* Restore banner if draft exists */}
+      {hasRestorableDraft && (
+        <div className="p-3 rounded-[var(--radius-lg)] bg-[var(--color-accent-subtle)] border border-[var(--color-accent)]/30 flex items-center justify-between text-xs text-[var(--color-ink)]">
+          <div className="flex items-center gap-2">
+            <Sparkles className="w-4 h-4 text-[var(--color-accent)]" />
+            <span>
+              You have an unsaved local draft for this event. Would you like to restore it?
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="outline" onClick={discardDraft}>
+              Discard
             </Button>
-          )}
-
-          {status === "published" && (
-            <span className="px-3 py-1 rounded-full text-xs font-semibold bg-accent/20 text-accent-deep border border-accent/40">
-              Published Live
-            </span>
-          )}
-        </div>
-      </div>
-
-      {/* Registration Warning Banner if Published with attendees */}
-      {status === "published" && totalExistingSold > 0 && (
-        <div className="p-4 bg-sand/30 border border-sand rounded-xl flex items-start gap-3 text-sm text-ink">
-          <AlertTriangle className="w-5 h-5 text-accent-deep shrink-0 mt-0.5" />
-          <div className="flex flex-col gap-0.5">
-            <span className="font-bold">Live Event Registration Notice</span>
-            <span className="text-xs text-ink-muted leading-relaxed">
-              This published event currently has <strong className="text-ink">{totalExistingSold} registered attendees</strong>. Modifying the date/time, venue address, or ticket prices will directly affect existing ticket holders.
-            </span>
+            <Button size="sm" variant="primary" onClick={restoreDraft}>
+              Restore draft
+            </Button>
           </div>
         </div>
       )}
 
-      {/* Two Column Layout: Form (640px) and Sticky Preview (390px) */}
-      <div className="flex flex-col xl:flex-row items-start gap-8">
-        {/* Left Column: Form (640px) */}
-        <div className="w-full xl:w-[640px] flex flex-col gap-6">
-          {/* Section 1: Basics */}
-          <Card variant="default">
-            <CardHeader>
-              <CardTitle>1. Basics</CardTitle>
-              <CardDescription>
-                Title, primary category, tags, and detailed overview.
-              </CardDescription>
-            </CardHeader>
+      {/* Main 3-Column Grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        {/* Left Column: SectionNav (Sticky, 200px equivalent) */}
+        <aside className="hidden lg:block lg:col-span-2 sticky top-20">
+          <SectionNav sections={sections} />
+        </aside>
 
-            <div className="flex flex-col gap-4">
+        {/* Middle Column: Form Sections (max-w-[680px]) */}
+        <main className="lg:col-span-6 space-y-10 max-w-[680px] w-full">
+          {/* SECTION 1: BASICS */}
+          <section
+            id="section-basics"
+            className="p-6 rounded-[var(--radius-lg)] border border-[var(--color-border-subtle)] bg-[var(--color-surface)] space-y-5 shadow-xs"
+          >
+            <div className="border-b border-[var(--color-border-subtle)] pb-3">
+              <h2 className="text-base font-bold text-[var(--color-ink)]">1. Basics</h2>
+              <p className="text-xs text-[var(--color-ink-muted)]">
+                General event identity, category, and host organization.
+              </p>
+            </div>
+
+            {/* Title */}
+            <div className="space-y-1">
+              <div className="flex justify-between items-center">
+                <label
+                  htmlFor="field-title"
+                  className="text-xs font-semibold text-[var(--color-ink)]"
+                >
+                  Event Title <span className="text-[var(--color-crimson)]">*</span>
+                </label>
+                <span className="text-[10px] text-[var(--color-ink-muted)]">
+                  {title.length}/80
+                </span>
+              </div>
               <Input
-                label="Event Title"
-                placeholder="e.g. Islamabad Sufi Night 2026"
+                id="field-title"
                 maxLength={80}
+                placeholder="e.g. Islamabad Sufi & Qawwali Night"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
-                helperText={`${title.length} / 80 characters`}
-                required
+                error={errors.title}
               />
+            </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            {/* Description */}
+            <div className="space-y-1">
+              <div className="flex justify-between items-center">
+                <label
+                  htmlFor="field-description"
+                  className="text-xs font-semibold text-[var(--color-ink)]"
+                >
+                  About the Event
+                </label>
+                <span className="text-[10px] text-[var(--color-ink-muted)]">
+                  {description.length}/5000
+                </span>
+              </div>
+              <Textarea
+                id="field-description"
+                rows={4}
+                maxLength={5000}
+                placeholder="Provide event overview, what to expect, atmosphere, and house rules..."
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                error={errors.description}
+              />
+            </div>
+
+            {/* Category & Featured */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-1">
+                <label
+                  htmlFor="field-category"
+                  className="text-xs font-semibold text-[var(--color-ink)]"
+                >
+                  Category <span className="text-[var(--color-crimson)]">*</span>
+                </label>
                 <Select
-                  label="Category"
+                  id="field-category"
                   value={categoryId}
                   onChange={(e) => setCategoryId(e.target.value)}
                   options={CATEGORIES}
-                  required
                 />
-
-                <div className="flex flex-col gap-1.5">
-                  <label className="text-xs font-semibold text-ink uppercase tracking-wide">
-                    Tags (Max 8)
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="text"
-                      placeholder="Add tag and press +"
-                      value={tagInput}
-                      onChange={(e) => setTagInput(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter") {
-                          e.preventDefault();
-                          handleAddTag();
-                        }
-                      }}
-                      className="flex-1 bg-surface border border-border rounded-md px-3 py-2 text-xs text-ink placeholder:text-ink-faint focus:outline-none focus:ring-1 focus:ring-accent"
-                    />
-                    <Button
-                      type="button"
-                      variant="secondary"
-                      size="sm"
-                      onClick={handleAddTag}
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                    </Button>
-                  </div>
-                </div>
               </div>
 
-              {tags.length > 0 && (
-                <div className="flex flex-wrap gap-1.5 pt-1">
-                  {tags.map((tag) => (
-                    <span
-                      key={tag}
-                      className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-surface-subtle border border-border text-xs text-ink font-medium"
-                    >
-                      #{tag}
-                      <button
-                        type="button"
-                        onClick={() => handleRemoveTag(tag)}
-                        className="text-ink-faint hover:text-crimson"
-                      >
-                        &times;
-                      </button>
-                    </span>
+              <div className="flex flex-col justify-end p-3 rounded-[var(--radius-md)] border border-[var(--color-border-subtle)] bg-[var(--color-surface-subtle)]">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-xs font-semibold text-[var(--color-ink)]">
+                      Featured Event
+                    </div>
+                    <div className="text-[10px] text-[var(--color-ink-muted)]">
+                      Display on top banner &amp; spotlight
+                    </div>
+                  </div>
+                  <Switch checked={isFeatured} onCheckedChange={setIsFeatured} />
+                </div>
+              </div>
+            </div>
+
+            {/* Organizer */}
+            <div className="space-y-1">
+              <label className="text-xs font-semibold text-[var(--color-ink)]">
+                Organizer <span className="text-[var(--color-crimson)]">*</span>
+              </label>
+              {organizers.length > 0 ? (
+                <select
+                  value={organizerId || ""}
+                  onChange={(e) => {
+                    const selected = organizers.find((o) => o.id === e.target.value);
+                    if (selected) {
+                      setOrganizerId(selected.id);
+                      setOrganizerName(selected.name);
+                    } else {
+                      setOrganizerId(null);
+                    }
+                  }}
+                  className="w-full text-xs px-3 py-2 rounded-[var(--radius-md)] border border-[var(--color-border-subtle)] bg-[var(--color-surface)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-accent)]"
+                >
+                  <option value="">-- Select Organizer --</option>
+                  {organizers.map((org) => (
+                    <option key={org.id} value={org.id}>
+                      {org.name} {org.email ? `(${org.email})` : ""}
+                    </option>
                   ))}
+                </select>
+              ) : (
+                <Input
+                  placeholder="Organizer name"
+                  value={organizerName}
+                  onChange={(e) => setOrganizerName(e.target.value)}
+                />
+              )}
+            </div>
+
+            {/* Tags Input */}
+            <div className="space-y-1.5">
+              <div className="flex justify-between items-center">
+                <label className="text-xs font-semibold text-[var(--color-ink)]">
+                  Tags ({tags.length}/8)
+                </label>
+                <span className="text-[10px] text-[var(--color-ink-muted)]">
+                  Press Enter to add
+                </span>
+              </div>
+              <div className="flex flex-wrap gap-1.5 p-2 rounded-[var(--radius-md)] border border-[var(--color-border-subtle)] bg-[var(--color-surface)] min-h-[42px] items-center">
+                {tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-[var(--color-surface-subtle)] text-[11px] font-medium text-[var(--color-ink)] border border-[var(--color-border-subtle)]"
+                  >
+                    #{tag}
+                    <button
+                      type="button"
+                      onClick={() => handleRemoveTag(tag)}
+                      className="hover:text-[var(--color-crimson)] ml-0.5"
+                    >
+                      &times;
+                    </button>
+                  </span>
+                ))}
+                {tags.length < 8 && (
+                  <input
+                    type="text"
+                    placeholder={tags.length === 0 ? "e.g. livemusic, outdoor, sufi" : "Add tag..."}
+                    value={tagInput}
+                    onChange={(e) => setTagInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === ",") {
+                        e.preventDefault();
+                        handleAddTag();
+                      } else if (e.key === "Backspace" && !tagInput && tags.length > 0) {
+                        handleRemoveTag(tags[tags.length - 1]);
+                      }
+                    }}
+                    className="text-xs bg-transparent border-none outline-none flex-1 min-w-[100px] text-[var(--color-ink)] placeholder:text-[var(--color-ink-faint)]"
+                  />
+                )}
+              </div>
+            </div>
+          </section>
+
+          {/* SECTION 2: WHEN & WHERE */}
+          <section
+            id="section-when-where"
+            className="p-6 rounded-[var(--radius-lg)] border border-[var(--color-border-subtle)] bg-[var(--color-surface)] space-y-5 shadow-xs"
+          >
+            <div className="border-b border-[var(--color-border-subtle)] pb-3 flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-bold text-[var(--color-ink)]">2. When &amp; where</h2>
+                <p className="text-xs text-[var(--color-ink-muted)]">
+                  Event date, schedule in Pakistan Standard Time (PKT), and venue mapping.
+                </p>
+              </div>
+
+              {/* Repeat Toggle (in create mode) */}
+              {!isEditing && (
+                <div>
+                  {seriesOccurrences.length > 1 ? (
+                    <button
+                      type="button"
+                      onClick={() => setIsRepeatModalOpen(true)}
+                      className="px-2.5 py-1 rounded-[var(--radius-md)] bg-[var(--color-accent-subtle)] text-[var(--color-accent)] border border-[var(--color-accent)]/30 text-xs font-semibold flex items-center gap-1.5 hover:bg-[var(--color-accent)] hover:text-white transition-colors"
+                    >
+                      <Repeat className="w-3.5 h-3.5" />
+                      Series ({seriesOccurrences.length} dates) · Edit
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => setIsRepeatModalOpen(true)}
+                      className="text-xs text-[var(--color-ink-muted)] hover:text-[var(--color-accent)] font-medium flex items-center gap-1 transition-colors"
+                    >
+                      <Repeat className="w-3.5 h-3.5" />
+                      Repeat this event
+                    </button>
+                  )}
                 </div>
               )}
-
-              <Textarea
-                label="Full Description"
-                placeholder="Describe what attendees can expect, schedule, dress code..."
-                rows={6}
-                maxLength={5000}
-                currentLength={description.length}
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-              />
             </div>
-          </Card>
 
-          {/* Section 2: When & Where (PKT Timezone Handling) */}
-          <Card variant="default">
-            <CardHeader>
-              <CardTitle>2. When &amp; Where</CardTitle>
-              <CardDescription>
-                Strictly scheduled in Pakistan Standard Time (PKT).
-              </CardDescription>
-            </CardHeader>
-
-            <div className="flex flex-col gap-5">
-              {/* Start Date & Time */}
-              <div className="p-4 rounded-lg bg-surface-subtle border border-border flex flex-col gap-3">
-                <span className="text-xs font-semibold text-ink uppercase tracking-wide flex items-center gap-1.5">
-                  <Calendar className="w-3.5 h-3.5 text-accent-deep" />
-                  Event Start Date &amp; Time
-                </span>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            {/* Starts & Ends in PKT */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              {/* Starts */}
+              <div className="space-y-1" id="field-start-time">
+                <label className="text-xs font-semibold text-[var(--color-ink)]">
+                  Starts (PKT) <span className="text-[var(--color-crimson)]">*</span>
+                </label>
+                <div className="grid grid-cols-2 gap-2">
                   <Input
                     type="date"
-                    label="Date (PKT)"
                     value={startDateStr}
                     onChange={(e) => setStartDateStr(e.target.value)}
-                    required
                   />
                   <Input
                     type="time"
-                    label="Time (PKT)"
                     value={startTimeStr}
                     onChange={(e) => setStartTimeStr(e.target.value)}
-                    required
                   />
                 </div>
-
-                {/* Read-back label strictly required under every datetime field */}
-                <div className="text-xs font-medium text-accent-deep font-mono flex items-center gap-1.5">
-                  <Clock className="w-3.5 h-3.5" />
-                  <span>Saving as {pktLabel(computedStartTime)}</span>
-                </div>
-              </div>
-
-              {/* End Date & Time Toggle */}
-              <div className="flex flex-col gap-3">
-                <Switch
-                  label="Specify End Date & Time"
-                  checked={hasEndTime}
-                  onCheckedChange={setHasEndTime}
-                />
-
-                {hasEndTime && (
-                  <div className="p-4 rounded-lg bg-surface-subtle border border-border flex flex-col gap-3">
-                    <span className="text-xs font-semibold text-ink uppercase tracking-wide flex items-center gap-1.5">
-                      <Calendar className="w-3.5 h-3.5 text-accent-deep" />
-                      Event End Date &amp; Time
-                    </span>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                      <Input
-                        type="date"
-                        label="End Date (PKT)"
-                        value={endDateStr}
-                        onChange={(e) => setEndDateStr(e.target.value)}
-                      />
-                      <Input
-                        type="time"
-                        label="End Time (PKT)"
-                        value={endTimeStr}
-                        onChange={(e) => setEndTimeStr(e.target.value)}
-                      />
-                    </div>
-
-                    <div className="text-xs font-medium text-accent-deep font-mono flex items-center gap-1.5">
-                      <Clock className="w-3.5 h-3.5" />
-                      <span>Saving as {pktLabel(computedEndTime)}</span>
-                    </div>
+                {computedStartTime && (
+                  <div className="text-[11px] font-mono text-[var(--color-crimson)] font-semibold mt-1">
+                    {pktLabel(computedStartTime)}
                   </div>
+                )}
+                {errors.startTime && (
+                  <p className="text-xs text-[var(--color-crimson)]">{errors.startTime}</p>
                 )}
               </div>
 
-              {/* Venue & Address */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              {/* Ends */}
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-[var(--color-ink)]">
+                  Ends (PKT)
+                </label>
+                <div className="grid grid-cols-2 gap-2">
+                  <Input
+                    type="date"
+                    value={endDateStr}
+                    onChange={(e) => setEndDateStr(e.target.value)}
+                  />
+                  <Input
+                    type="time"
+                    value={endTimeStr}
+                    onChange={(e) => setEndTimeStr(e.target.value)}
+                  />
+                </div>
+                {computedEndTime && (
+                  <div className="text-[11px] font-mono text-[var(--color-ink-muted)] font-semibold mt-1">
+                    {pktLabel(computedEndTime)}
+                  </div>
+                )}
+                {errors.endTime && (
+                  <p className="text-xs text-[var(--color-crimson)]">{errors.endTime}</p>
+                )}
+              </div>
+            </div>
+
+            {/* Venue Name & Address */}
+            <div className="space-y-4 pt-2">
+              <div className="space-y-1" id="field-venue">
+                <label className="text-xs font-semibold text-[var(--color-ink)]">
+                  Venue Name <span className="text-[var(--color-crimson)]">*</span>
+                </label>
                 <Input
-                  label="Venue Name"
-                  placeholder="e.g. Lok Virsa Amphitheatre"
+                  placeholder="e.g. Lok Virsa Amphitheatre, Shakarparian"
                   value={venueName}
                   onChange={(e) => setVenueName(e.target.value)}
-                  required
+                  error={errors.venueName}
                 />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-semibold text-[var(--color-ink)]">
+                  Street Address (Optional)
+                </label>
                 <Input
-                  label="Street Address / Area"
-                  placeholder="Garden Ave, Shakarparian, Islamabad"
+                  placeholder="e.g. Garden Ave, Shakarparian Hills, Islamabad"
                   value={address}
                   onChange={(e) => setAddress(e.target.value)}
                 />
               </div>
 
-              {/* Coordinates & Google Maps Link Parser */}
-              <div className="p-4 rounded-lg bg-surface-subtle border border-border flex flex-col gap-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-ink uppercase tracking-wide flex items-center gap-1.5">
-                    <MapPin className="w-3.5 h-3.5 text-accent-deep" />
-                    Map Coordinates
-                  </span>
-                  {latitude != null && longitude != null && (
+              {/* Google Maps Link / Coordinates Parser */}
+              <div className="space-y-2 p-3.5 rounded-[var(--radius-md)] border border-[var(--color-border-subtle)] bg-[var(--color-surface-subtle)]">
+                <label className="text-xs font-semibold text-[var(--color-ink)] flex items-center justify-between">
+                  <span>Google Maps link or Coordinates</span>
+                  {latitude && longitude && (
                     <a
-                      href={`https://maps.google.com/?q=${latitude},${longitude}`}
+                      href={`https://www.google.com/maps?q=${latitude},${longitude}`}
                       target="_blank"
-                      rel="noreferrer"
-                      className="text-xs text-accent-deep hover:underline flex items-center gap-1 font-semibold"
+                      rel="noopener noreferrer"
+                      className="text-[11px] text-[var(--color-accent)] font-semibold hover:underline flex items-center gap-1"
                     >
-                      <ExternalLink className="w-3.5 h-3.5" />
-                      View on Google Maps ↗
+                      View on Google Maps
+                      <ExternalLink className="w-3 h-3" />
                     </a>
                   )}
-                </div>
+                </label>
 
                 <Input
-                  label="Google Maps link or coordinates"
-                  placeholder="Paste URL or type e.g. 33.6892, 73.0729"
+                  placeholder="Paste Google Maps URL (https://maps.app.goo.gl/...) or 33.6844, 73.0479"
                   value={mapsInput}
                   onChange={(e) => handleMapsInputChange(e.target.value)}
-                  helperText="Paste any Google Maps link (computer address bar or share link), or type coordinates directly like 33.6892, 73.0729"
                 />
 
-                {mapsError && (
-                  <p className="text-xs text-crimson bg-crimson-surface p-2.5 rounded-md border border-crimson/20">
-                    {mapsError}
-                  </p>
-                )}
-
-                {latitude != null && longitude != null && (
-                  <div className="flex items-center justify-between text-xs text-accent-deep font-semibold bg-surface px-3 py-2 rounded-md border border-accent/30">
-                    <span className="flex items-center gap-1.5">
-                      <Check className="w-3.5 h-3.5 text-accent-deep shrink-0" />
-                      ✓ {latitude.toFixed(5)}, {longitude.toFixed(5)}
-                    </span>
-                    <a
-                      href={`https://maps.google.com/?q=${latitude},${longitude}`}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="underline hover:text-ink text-[11px]"
-                    >
-                      [View on Google Maps ↗]
-                    </a>
-                  </div>
-                )}
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
-                  <Input
-                    type="number"
-                    step="any"
-                    label="Latitude (23 – 37)"
-                    placeholder="33.6892"
-                    value={latitude ?? ""}
-                    onChange={(e) =>
-                      setLatitude(e.target.value ? parseFloat(e.target.value) : null)
-                    }
-                  />
-                  <Input
-                    type="number"
-                    step="any"
-                    label="Longitude (60 – 78)"
-                    placeholder="73.0729"
-                    value={longitude ?? ""}
-                    onChange={(e) =>
-                      setLongitude(e.target.value ? parseFloat(e.target.value) : null)
-                    }
-                  />
+                <div className="flex items-center gap-4 text-xs font-mono text-[var(--color-ink-muted)]">
+                  <span>Lat: {latitude !== null ? latitude.toFixed(6) : "None"}</span>
+                  <span>Lng: {longitude !== null ? longitude.toFixed(6) : "None"}</span>
                 </div>
+                {errors.latitude && (
+                  <p className="text-xs text-[var(--color-crimson)]">{errors.latitude}</p>
+                )}
               </div>
             </div>
-          </Card>
+          </section>
 
-          {/* Section 3: Organizer */}
-          <Card variant="default">
-            <CardHeader>
-              <CardTitle>3. Organizer</CardTitle>
-              <CardDescription>
-                Assign the responsible host entity for this event.
-              </CardDescription>
-            </CardHeader>
-
-            <div className="flex flex-col gap-4">
-              <Select
-                label="Select Organizer"
-                value={organizerId}
-                onChange={(e) => setOrganizerId(e.target.value)}
-                required
-              >
-                <option value="">-- Choose Organizer --</option>
-                {organizers.map((org) => (
-                  <option key={org.id} value={org.id}>
-                    {org.name} ({org.email})
-                  </option>
-                ))}
-              </Select>
-
-              {organizerId && (
-                <div className="p-3 bg-surface-subtle border border-border rounded-lg text-xs text-ink-muted flex items-center justify-between">
-                  <span>Selected Host: <strong className="text-ink">{organizerName}</strong></span>
-                  <Link
-                    href={`/organizers/${organizerId}`}
-                    className="text-accent-deep hover:underline font-medium"
-                  >
-                    View Profile
-                  </Link>
-                </div>
-              )}
+          {/* SECTION 3: IMAGES */}
+          <section
+            id="section-images"
+            className="p-6 rounded-[var(--radius-lg)] border border-[var(--color-border-subtle)] bg-[var(--color-surface)] space-y-5 shadow-xs"
+          >
+            <div className="border-b border-[var(--color-border-subtle)] pb-3">
+              <h2 className="text-base font-bold text-[var(--color-ink)]">
+                3. Images <span className="text-[var(--color-crimson)]">*</span>
+              </h2>
+              <p className="text-xs text-[var(--color-ink-muted)]">
+                Upload up to 8 images. Image 1 is the cover. Set focal points and preview crops in real time.
+              </p>
             </div>
-          </Card>
 
-          {/* Section 4: Tickets & Pricing */}
-          <Card variant="default">
-            <CardHeader>
-              <CardTitle>4. Tickets &amp; Pricing</CardTitle>
-              <CardDescription>
-                Configure ticket types, pricing tiers, and online registration links.
-              </CardDescription>
-            </CardHeader>
+            <ImageManager
+              images={images}
+              organizerId={organizerId}
+              onChange={setImages}
+              onUploadingChange={setIsUploadingImages}
+              error={errors.images}
+            />
+          </section>
 
-            <div className="flex flex-col gap-5">
-              <Switch
-                label="Free Event"
-                description="Attendees do not require a paid ticket to attend."
-                checked={isFreeEvent}
-                onCheckedChange={(checked) => {
-                  setIsFreeEvent(checked);
-                  if (checked) {
-                    setTicketTypes((prev) =>
-                      prev.map((t) => ({ ...t, pricePkr: 0 }))
-                    );
-                  }
-                }}
-              />
+          {/* SECTION 4: TICKETS */}
+          <section
+            id="section-tickets"
+            className="p-6 rounded-[var(--radius-lg)] border border-[var(--color-border-subtle)] bg-[var(--color-surface)] space-y-5 shadow-xs"
+          >
+            <div className="border-b border-[var(--color-border-subtle)] pb-3 flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-bold text-[var(--color-ink)]">4. Tickets &amp; Pricing</h2>
+                <p className="text-xs text-[var(--color-ink-muted)]">
+                  Configure admission types, capacity limits, and external checkout links.
+                </p>
+              </div>
+              <Button type="button" size="sm" variant="outline" onClick={addTicketType}>
+                <Plus className="w-3.5 h-3.5 mr-1" /> Add Ticket Type
+              </Button>
+            </div>
 
-              {!isFreeEvent && (
+            {/* Ticket Types List */}
+            <div className="space-y-3">
+              {ticketTypes.map((ticket, idx) => (
+                <div
+                  key={ticket.id}
+                  className="p-4 rounded-[var(--radius-md)] border border-[var(--color-border-subtle)] bg-[var(--color-surface)] space-y-3"
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-[var(--color-ink)]">
+                      Tier #{idx + 1}
+                    </span>
+                    {ticketTypes.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() => removeTicketType(ticket.id)}
+                        className="text-[var(--color-ink-faint)] hover:text-[var(--color-crimson)] transition-colors p-1"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-semibold text-[var(--color-ink)]">
+                        Name
+                      </label>
+                      <Input
+                        value={ticket.name}
+                        onChange={(e) => updateTicketType(ticket.id, { name: e.target.value })}
+                        placeholder="e.g. VIP Pass, Early Bird"
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-semibold text-[var(--color-ink)]">
+                        Price (PKR, 0 = Free)
+                      </label>
+                      <Input
+                        type="number"
+                        min={0}
+                        value={ticket.pricePkr}
+                        onChange={(e) =>
+                          updateTicketType(ticket.id, { pricePkr: Number(e.target.value) })
+                        }
+                      />
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="text-[11px] font-semibold text-[var(--color-ink)]">
+                        Capacity
+                      </label>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={ticket.capacity}
+                        onChange={(e) =>
+                          updateTicketType(ticket.id, { capacity: Number(e.target.value) })
+                        }
+                      />
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Paid Ticket Checkout Link */}
+            {priceMinPkr > 0 && (
+              <div className="space-y-1 pt-2" id="field-ticket-url">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-semibold text-[var(--color-ink)]">
+                    Ticket / Booking URL <span className="text-[var(--color-crimson)]">*</span>
+                  </label>
+                  <span className="text-[10px] text-[var(--color-ink-muted)]">
+                    Required for paid events
+                  </span>
+                </div>
                 <Input
-                  label="External Ticket Purchase URL"
-                  placeholder="https://bookme.pk/events/..."
+                  placeholder="https://ticketwala.pk/event/... or WhatsApp booking link"
                   value={ticketUrl}
                   onChange={(e) => setTicketUrl(e.target.value)}
-                  helperText="Mandatory for paid events"
-                  required
+                  error={errors.ticketUrl}
                 />
-              )}
-
-              {/* Ticket types list */}
-              <div className="flex flex-col gap-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-semibold text-ink uppercase tracking-wide">
-                    Ticket Types / Passes
-                  </span>
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    size="sm"
-                    onClick={handleAddTicketType}
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    Add Tier
-                  </Button>
-                </div>
-
-                <div className="flex flex-col gap-3">
-                  {ticketTypes.map((t) => (
-                    <div
-                      key={t.id}
-                      className="p-4 rounded-lg bg-surface-subtle border border-border flex flex-col gap-3"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs font-semibold text-ink">
-                          {t.name}
-                        </span>
-                        {ticketTypes.length > 1 && (
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveTicketType(t.id)}
-                            className="text-ink-faint hover:text-crimson p-1"
-                            title="Remove ticket type"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        )}
-                      </div>
-
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                        <Input
-                          label="Tier Name"
-                          value={t.name}
-                          onChange={(e) =>
-                            handleUpdateTicketType(t.id, "name", e.target.value)
-                          }
-                          required
-                        />
-                        <Input
-                          type="number"
-                          label="Price (PKR)"
-                          value={isFreeEvent ? 0 : t.pricePkr}
-                          disabled={isFreeEvent}
-                          onChange={(e) =>
-                            handleUpdateTicketType(
-                              t.id,
-                              "pricePkr",
-                              Number(e.target.value)
-                            )
-                          }
-                          required
-                        />
-                        <Input
-                          type="number"
-                          label="Capacity"
-                          value={t.capacity}
-                          onChange={(e) =>
-                            handleUpdateTicketType(
-                              t.id,
-                              "capacity",
-                              Number(e.target.value)
-                            )
-                          }
-                          required
-                        />
-                      </div>
-
-                      {isEditing && (
-                        <div className="text-[11px] text-ink-muted">
-                          Sold so far: <strong className="text-ink">{t.soldCount || 0}</strong> tickets (preserved on edit)
-                        </div>
-                      )}
-                    </div>
-                  ))}
-                </div>
               </div>
-            </div>
-          </Card>
-
-          {/* Section 5: Media & Multi-Image (Cover 2.4:1 + Gallery 4:3) */}
-          <MultiImageManager
-            imageUrls={imageUrls}
-            onChange={setImageUrls}
-            onUploadFile={(f) => uploadEventImage(initialData?.id || "temp", f)}
-          />
-
-          {/* Section 6: Visibility */}
-          <Card variant="default">
-            <CardHeader>
-              <CardTitle>6. Visibility &amp; Promotion</CardTitle>
-            </CardHeader>
-
-            <Switch
-              label="Featured Event"
-              description="Pins this event to the top carousel of the home feed in Islamabad."
-              checked={isFeatured}
-              onCheckedChange={setIsFeatured}
-            />
-          </Card>
-        </div>
-
-        {/* Right Column: Sticky Phone Preview (390px) */}
-        <div className="w-full xl:w-[390px] shrink-0">
-          <PhoneFrame data={currentFormData} />
-        </div>
-      </div>
-
-      {/* Sticky Bottom Actions Footer */}
-      <div className="fixed bottom-0 left-0 right-0 z-40 bg-surface/95 backdrop-blur-xs border-t border-border px-8 py-3.5 shadow-lg">
-        <div className="max-w-[1400px] mx-auto flex items-center justify-between">
-          <div className="text-xs text-ink-muted flex items-center gap-2">
-            {lastSavedTime ? (
-              <span>Last saved at <strong className="text-ink">{lastSavedTime}</strong></span>
-            ) : (
-              <span>Status: <strong className="capitalize text-ink">{status}</strong></span>
             )}
-          </div>
+          </section>
 
-          <div className="flex items-center gap-3">
-            <Button
-              type="button"
-              variant="secondary"
-              isLoading={isSavingDraft}
-              onClick={handleSaveDraft}
-            >
-              <Save className="w-4 h-4" />
-              Save Draft
-            </Button>
-
-            {/* Publish Button with Tooltip / Missing Gate popover */}
-            <div className="relative group">
-              <Button
-                type="button"
-                variant="primary"
-                disabled={!isPublishAllowed}
-                onClick={() => setIsPublishModalOpen(true)}
-              >
-                <Send className="w-4 h-4" />
-                {status === "published" ? "Publish Updates" : "Publish Event"}
-              </Button>
-
-              {!isPublishAllowed && (
-                <div className="absolute bottom-full right-0 mb-2 w-72 p-3 bg-surface border border-border rounded-lg shadow-xl text-xs text-ink opacity-0 group-hover:opacity-100 pointer-events-none transition-opacity z-50">
-                  <div className="flex items-center gap-1.5 font-bold text-crimson mb-1.5">
-                    <Info className="w-3.5 h-3.5" />
-                    Publish Requirements ({missingPublishItems.length} missing):
-                  </div>
-                  <ul className="list-disc pl-4 space-y-1 text-ink-muted text-[11px]">
-                    {missingPublishItems.map((item, idx) => (
-                      <li key={idx}>{item}</li>
-                    ))}
-                  </ul>
-                </div>
-              )}
+          {/* SECTION 5: DETAILS (OPTIONAL) */}
+          <section
+            id="section-details"
+            className="p-6 rounded-[var(--radius-lg)] border border-[var(--color-border-subtle)] bg-[var(--color-surface)] space-y-6 shadow-xs"
+          >
+            <div className="border-b border-[var(--color-border-subtle)] pb-3">
+              <div className="flex items-center justify-between">
+                <h2 className="text-base font-bold text-[var(--color-ink)]">
+                  5. Details &amp; Amenities
+                </h2>
+                <span className="text-xs text-[var(--color-ink-muted)]">Optional</span>
+              </div>
+              <p className="text-xs text-[var(--color-ink-muted)]">
+                Audience restrictions, spoken languages, venue amenities, itinerary schedule, and FAQs.
+              </p>
             </div>
-          </div>
-        </div>
+
+            {/* Chip Groups */}
+            <ChipGroup
+              selectedAudience={audience}
+              selectedLanguages={languages}
+              selectedAmenities={amenities}
+              onAudienceChange={setAudience}
+              onLanguagesChange={setLanguages}
+              onAmenitiesChange={setAmenities}
+              onAddEntryFaq={() => {
+                const entryFaq = "How will entry be checked?";
+                if (!faq.some((f) => f.q === entryFaq)) {
+                  setFaq([
+                    ...faq,
+                    {
+                      id: `faq_${Date.now()}`,
+                      q: entryFaq,
+                      a: "Please present your valid student ID / CNIC card at the entrance gate.",
+                    },
+                  ]);
+                  toast.success("Added door check FAQ");
+                }
+              }}
+            />
+
+            <hr className="border-[var(--color-border-subtle)]" />
+
+            {/* Agenda Table */}
+            <AgendaTable
+              agenda={agenda}
+              startTime={computedStartTime}
+              endTime={computedEndTime}
+              onChange={setAgenda}
+              error={errors.agenda}
+            />
+
+            <hr className="border-[var(--color-border-subtle)]" />
+
+            {/* FAQ List */}
+            <FaqList faq={faq} onChange={setFaq} error={errors.faq} />
+          </section>
+        </main>
+
+        {/* Right Column: Phone Preview & Checklist (Sticky, 400px equivalent) */}
+        <aside className="hidden lg:block lg:col-span-4 sticky top-20 space-y-6">
+          <PhonePreview data={currentFormValues} />
+          <EventChecklist data={currentFormValues} isUploadingImages={isUploadingImages} />
+        </aside>
       </div>
 
-      {/* Publish Confirmation Modal */}
+      {/* Sticky Bottom Footer */}
+      <footer className="sticky bottom-0 z-40 bg-[var(--color-surface)]/95 backdrop-blur-md border-t border-[var(--color-border-subtle)] py-3 px-6 -mx-6 flex items-center justify-between shadow-md">
+        <div className="flex items-center gap-3">
+          <Link href="/events">
+            <Button variant="ghost" size="sm">
+              <ArrowLeft className="w-4 h-4 mr-1.5" /> Back to events
+            </Button>
+          </Link>
+          {lastSavedTime && (
+            <span className="text-xs text-[var(--color-ink-muted)] hidden sm:inline">
+              Autosaved draft at {lastSavedTime}
+            </span>
+          )}
+        </div>
+
+        <div className="flex items-center gap-3">
+          {isEditing && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setIsPostponeModalOpen(true)}
+              >
+                Postpone
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => setIsCancelModalOpen(true)}
+              >
+                Cancel event
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={() => setIsDeleteModalOpen(true)}
+              >
+                Delete
+              </Button>
+            </>
+          )}
+
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={isSubmitting}
+            onClick={handleSaveDraft}
+          >
+            <Save className="w-4 h-4 mr-1.5" /> Save draft
+          </Button>
+
+          <Button
+            variant="primary"
+            size="sm"
+            disabled={isSubmitting || isUploadingImages}
+            onClick={() => setIsPublishModalOpen(true)}
+          >
+            <Send className="w-4 h-4 mr-1.5" />
+            {seriesOccurrences.length > 1
+              ? `Publish series (${seriesOccurrences.length})`
+              : "Publish"}
+          </Button>
+        </div>
+      </footer>
+
+      {/* Repeat Modal */}
+      <RepeatModal
+        isOpen={isRepeatModalOpen}
+        baseStartTime={computedStartTime || new Date()}
+        baseEndTime={computedEndTime}
+        initialOccurrences={seriesOccurrences}
+        onClose={() => setIsRepeatModalOpen(false)}
+        onApply={(occs) => {
+          setSeriesOccurrences(occs);
+          toast.success(`Series configured: ${occs.length} occurrences`);
+        }}
+      />
+
+      {/* Publish Confirm Modal */}
       <PublishConfirmModal
         isOpen={isPublishModalOpen}
         onClose={() => setIsPublishModalOpen(false)}
-        onConfirm={handleConfirmPublish}
-        eventTitle={title}
-        organizerName={organizerName}
-        isRepublish={initialData?.status === "published"}
-        isLoading={isPublishing}
+        onConfirm={handlePublishSubmit}
+        isPublishing={isSubmitting}
+        seriesCount={seriesOccurrences.length > 1 ? seriesOccurrences.length : undefined}
       />
 
-      {/* Cancel Event Modal */}
-      {initialData && (
-        <CancelEventModal
-          isOpen={isCancelModalOpen}
-          onClose={() => setIsCancelModalOpen(false)}
-          onConfirm={handleConfirmCancel}
-          eventTitle={title}
-          registeredCount={totalExistingSold}
-          isLoading={isCancelling}
-        />
-      )}
+      {/* Other Modals for existing event actions */}
+      {isEditing && initialEvent && (
+        <>
+          <CancelEventModal
+            isOpen={isCancelModalOpen}
+            onClose={() => setIsCancelModalOpen(false)}
+            eventTitle={title || initialEvent.title}
+            registeredCount={initialEvent.soldCount || 0}
+            onConfirm={async (reason) => {
+              await cancelEvent(initialEvent.id, reason, initialEvent.organizerId);
+              toast.success("Event cancelled");
+              queryClient.invalidateQueries({ queryKey: qk.events.all });
+              router.push("/events");
+            }}
+          />
 
-      {/* Postpone Event Modal */}
-      {initialData && (
-        <PostponeEventModal
-          isOpen={isPostponeModalOpen}
-          onClose={() => setIsPostponeModalOpen(false)}
-          onConfirm={handleConfirmPostpone}
-          eventTitle={title}
-          currentStartTime={computedStartTime}
-          currentEndTime={computedEndTime}
-          isLoading={isPostponing}
-        />
-      )}
+          <PostponeEventModal
+            isOpen={isPostponeModalOpen}
+            onClose={() => setIsPostponeModalOpen(false)}
+            eventTitle={title || initialEvent.title}
+            onConfirm={async (params) => {
+              await postponeEvent(initialEvent.id, params, initialEvent.organizerId);
+              toast.success("Event postponed");
+              queryClient.invalidateQueries({ queryKey: qk.events.all });
+              router.push("/events");
+            }}
+          />
 
-      {/* Delete Event Modal */}
-      {initialData && (
-        <DeleteEventModal
-          isOpen={isDeleteModalOpen}
-          onClose={() => setIsDeleteModalOpen(false)}
-          onConfirm={handleConfirmDelete}
-          eventTitle={title}
-          registeredCount={totalExistingSold}
-          isLoading={isDeleting}
-        />
+          <DeleteEventModal
+            isOpen={isDeleteModalOpen}
+            onClose={() => setIsDeleteModalOpen(false)}
+            eventTitle={title || initialEvent.title}
+            registeredCount={initialEvent.soldCount || 0}
+            onConfirm={async () => {
+              await deleteEvent(initialEvent.id, initialEvent.organizerId);
+              toast.success("Event deleted");
+              queryClient.invalidateQueries({ queryKey: qk.events.all });
+              router.push("/events");
+            }}
+          />
+        </>
       )}
     </div>
   );
 }
+export default EventForm;

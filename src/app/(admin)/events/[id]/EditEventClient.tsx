@@ -10,14 +10,23 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Calendar } from "lucide-react";
 
+import { getRouteId } from "@/lib/utils";
+
 export function EditEventClient() {
   const params = useParams();
-  const id = params?.id as string;
+  const [resolvedId, setResolvedId] = React.useState<string>(() => getRouteId(params?.id as string));
+
+  React.useEffect(() => {
+    const real = getRouteId(params?.id as string);
+    if (real && real !== resolvedId) {
+      setResolvedId(real);
+    }
+  }, [params?.id, resolvedId]);
 
   const { data: event, isLoading, error } = useQuery({
-    queryKey: qk.events.detail(id),
-    queryFn: () => fetchEvent(id),
-    enabled: Boolean(id && id !== "_"),
+    queryKey: qk.events.detail(resolvedId),
+    queryFn: () => fetchEvent(resolvedId),
+    enabled: Boolean(resolvedId && resolvedId !== "_"),
   });
 
   if (isLoading) {
@@ -50,7 +59,7 @@ export function EditEventClient() {
           Update event information, schedule, tickets, and preview live mobile rendering.
         </p>
       </div>
-      <EventForm initialData={event} />
+      <EventForm initialEvent={event} />
     </div>
   );
 }

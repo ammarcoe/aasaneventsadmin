@@ -69,3 +69,17 @@ export function parseCoordinatesFromText(text: string): { lat: number; lng: numb
   }
   return null;
 }
+
+/**
+ * Extract dynamic ID safely across local development and Firebase Hosting static rewrite
+ */
+export function getRouteId(paramId: string | undefined): string {
+  if (paramId && paramId !== "_") return paramId;
+  if (typeof window !== "undefined") {
+    const parts = window.location.pathname.split("/").filter(Boolean);
+    if (parts.length >= 2 && parts[1] !== "_" && parts[1] !== "new") {
+      return decodeURIComponent(parts[1]);
+    }
+  }
+  return "";
+}

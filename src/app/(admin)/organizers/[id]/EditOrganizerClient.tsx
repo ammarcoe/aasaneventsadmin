@@ -10,14 +10,23 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Users2 } from "lucide-react";
 
+import { getRouteId } from "@/lib/utils";
+
 export function EditOrganizerClient() {
   const params = useParams();
-  const id = params?.id as string;
+  const [resolvedId, setResolvedId] = React.useState<string>(() => getRouteId(params?.id as string));
+
+  React.useEffect(() => {
+    const real = getRouteId(params?.id as string);
+    if (real && real !== resolvedId) {
+      setResolvedId(real);
+    }
+  }, [params?.id, resolvedId]);
 
   const { data: organizer, isLoading, error } = useQuery({
-    queryKey: qk.organizers.detail(id),
-    queryFn: () => fetchOrganizer(id),
-    enabled: Boolean(id && id !== "_"),
+    queryKey: qk.organizers.detail(resolvedId),
+    queryFn: () => fetchOrganizer(resolvedId),
+    enabled: Boolean(resolvedId && resolvedId !== "_"),
   });
 
   if (isLoading) {
