@@ -73,6 +73,10 @@ export const eventSchemaV2 = z
     priceMinPkr: z.coerce.number().int().min(0).nullable().optional(),
     priceMaxPkr: z.coerce.number().int().min(0).nullable().optional(),
     ticketUrl: z.string().url("Must be a valid URL").nullable().optional().or(z.literal("")),
+    // Paid events sold in the app: payout types that take the money (empty = all approved).
+    payoutMethods: z.array(z.enum(["raast", "jazzcash", "easypaisa", "iban"])).default([]),
+    // Form-only: the organizer has approved payout accounts and the event sells in the app.
+    sellsInApp: z.boolean().optional(),
     ticketTypes: z.array(ticketTypeSchema).min(1, "At least one ticket type"),
     isFeatured: z.boolean().default(false),
     status: z
@@ -88,8 +92,14 @@ export const eventSchemaV2 = z
     seriesCount: z.number().nullable().optional(),
   })
   .refine(
-    (d) => !(d.priceMinPkr && d.priceMinPkr > 0) || Boolean(d.ticketUrl && d.ticketUrl.length > 0),
-    { message: "Paid events need a link where people can buy", path: ["ticketUrl"] }
+    (d) =>
+      !((d.priceMinPkr ?? 0) > 0 || d.ticketTypes.some((t) => t.pricePkr > 0)) ||
+      Boolean(d.ticketUrl && d.ticketUrl.length > 0) ||
+      d.sellsInApp === true,
+    {
+      message: "Paid events need a ticket link, or an organizer with approved payment accounts",
+      path: ["ticketUrl"],
+    }
   )
   .refine((d) => !d.endTime || d.endTime > d.startTime, {
     message: "End must be after start",

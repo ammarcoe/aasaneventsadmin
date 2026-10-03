@@ -20,7 +20,12 @@ import {
 } from "firebase/firestore";
 import { ref, uploadBytesResumable, getDownloadURL } from "firebase/storage";
 import { db, storage } from "@/lib/firebase";
-import { eventConverter, organizerConverter, registrationConverter } from "@/lib/converters";
+import {
+  eventConverter,
+  organizerConverter,
+  registrationConverter,
+  toAppTicketPrice,
+} from "@/lib/converters";
 import type { Event, EventFilter, TicketType } from "@/types";
 import type { EventFormValues } from "./schema";
 import { stripAppOwnedFields } from "./constants";
@@ -160,6 +165,7 @@ export async function createEvent(data: EventFormValues): Promise<string> {
     priceMinPkr: data.priceMinPkr ?? null,
     priceMaxPkr: data.priceMaxPkr ?? null,
     ticketUrl: data.ticketUrl || null,
+    payoutMethods: data.payoutMethods ?? [],
     ticketTypes: data.ticketTypes.map((t) => ({
       ...t,
       soldCount: 0,
@@ -223,8 +229,10 @@ export async function createEventSeries(
       priceMinPkr: data.priceMinPkr ?? null,
       priceMaxPkr: data.priceMaxPkr ?? null,
       ticketUrl: data.ticketUrl || null,
+      payoutMethods: data.payoutMethods ?? [],
       ticketTypes: data.ticketTypes.map((t, tIdx) => ({
         ...t,
+        ...toAppTicketPrice(t),
         id: `ticket_${Date.now()}_${tIdx}`,
         soldCount: 0,
       })),
@@ -288,20 +296,26 @@ export async function updateEvent(
     }
   }
 
-  // 2. Preserve soldCount on ticket types
-  let mergedTickets = data.ticketTypes;
-  if (data.ticketTypes && existingEvent?.ticketTypes) {
-    const existingMap = new Map<string, number>(
-      existingEvent.ticketTypes.map((t) => [t.id, t.soldCount || 0])
-    );
+  // 2. Preserve soldCount on ticket types. Read it fresh: the payment server
+  // reserves seats while this form is open, and a stale count would undo that.
+  let mergedTickets: Record<string, unknown>[] | undefined;
+  if (data.ticketTypes) {
+    const fresh = await getDoc(docRef);
+    const freshTypes = (fresh.data()?.ticketTypes ?? existingEvent?.ticketTypes ?? []) as {
+      id: string;
+      soldCount?: number;
+    }[];
+    const soldMap = new Map<string, number>(freshTypes.map((t) => [t.id, t.soldCount || 0]));
     mergedTickets = data.ticketTypes.map((t) => ({
       ...t,
-      soldCount: existingMap.get(t.id) ?? t.soldCount ?? 0,
+      ...toAppTicketPrice(t),
+      soldCount: soldMap.get(t.id) ?? t.soldCount ?? 0,
     }));
   }
 
   // 3. Strip app-owned consumer fields & protect seriesIndex/seriesCount on update
   const cleanData = stripAppOwnedFields(data as Record<string, unknown>);
+  delete cleanData.sellsInApp; // form-only flag
   delete cleanData.seriesIndex;
   delete cleanData.seriesCount;
 
@@ -601,6 +615,7 @@ export async function duplicateEvent(
     priceMinPkr: source.priceMinPkr,
     priceMaxPkr: source.priceMaxPkr,
     ticketUrl: source.ticketUrl,
+    payoutMethods: source.payoutMethods ?? [],
     ticketTypes: duplicatedTickets,
     isFeatured: false,
     status: "draft",

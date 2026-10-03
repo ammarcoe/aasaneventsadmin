@@ -25,6 +25,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { toast } from "sonner";
+import { PaymentCell } from "@/features/payments/PaymentCell";
 
 export interface RegistrationsViewProps {
   eventId: string;
@@ -68,10 +69,11 @@ export function RegistrationsView({ eventId }: RegistrationsViewProps) {
     );
   });
 
-  // Metrics
-  const totalAttendees = registrations.reduce((acc, r) => acc + (r.quantity || 1), 0);
-  const totalRevenue = registrations.reduce((acc, r) => acc + (r.totalPkr || 0), 0);
-  const checkedInCount = registrations.filter((r) => r.checkedIn).reduce((acc, r) => acc + (r.quantity || 1), 0);
+  // Metrics: only confirmed registrations are attending (unpaid / in-review orders aren't).
+  const confirmed = registrations.filter((r) => (r.status || "confirmed") === "confirmed");
+  const totalAttendees = confirmed.reduce((acc, r) => acc + (r.quantity || 1), 0);
+  const totalRevenue = confirmed.reduce((acc, r) => acc + (r.totalPkr || 0), 0);
+  const checkedInCount = confirmed.filter((r) => r.checkedIn).reduce((acc, r) => acc + (r.quantity || 1), 0);
 
   // Copy for WhatsApp
   const handleCopyWhatsApp = () => {
@@ -87,7 +89,7 @@ export function RegistrationsView({ eventId }: RegistrationsViewProps) {
       "",
     ];
 
-    registrations.forEach((r, idx) => {
+    confirmed.forEach((r, idx) => {
       const contact = r.userPhone || r.userEmail || "No contact";
       lines.push(`${idx + 1}. *${r.userName}* (${r.ticketTypeName} × ${r.quantity}) - ${contact}`);
     });
@@ -265,6 +267,7 @@ export function RegistrationsView({ eventId }: RegistrationsViewProps) {
               <TableHead>Ticket Type</TableHead>
               <TableHead>Qty</TableHead>
               <TableHead>Total</TableHead>
+              <TableHead>Status</TableHead>
               <TableHead>Registered (PKT)</TableHead>
               <TableHead className="text-right">Check-In</TableHead>
             </TableRow>
@@ -291,6 +294,14 @@ export function RegistrationsView({ eventId }: RegistrationsViewProps) {
                 </TableCell>
                 <TableCell className="text-xs font-semibold">{r.quantity}</TableCell>
                 <TableCell className="text-xs font-bold">{formatPKR(r.totalPkr)}</TableCell>
+                <TableCell>
+                  <PaymentCell
+                    registration={r}
+                    onDecided={() =>
+                      queryClient.invalidateQueries({ queryKey: ["registrations", "event", eventId] })
+                    }
+                  />
+                </TableCell>
                 <TableCell className="text-xs text-ink-muted font-mono">
                   {pktLabel(r.createdAt)}
                 </TableCell>
@@ -299,6 +310,7 @@ export function RegistrationsView({ eventId }: RegistrationsViewProps) {
                     type="button"
                     variant={r.checkedIn ? "secondary" : "primary"}
                     size="sm"
+                    disabled={(r.status || "confirmed") !== "confirmed"}
                     onClick={() =>
                       checkInMutation.mutate({
                         id: r.id,

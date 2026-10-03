@@ -70,14 +70,14 @@ export const eventConverter: FirestoreDataConverter<Event> = {
       priceMinPkr: typeof ev.priceMinPkr === "number" ? ev.priceMinPkr : null,
       priceMaxPkr: typeof ev.priceMaxPkr === "number" ? ev.priceMaxPkr : null,
       ticketUrl: ev.ticketUrl ?? null,
+      payoutMethods: Array.isArray(ev.payoutMethods) ? ev.payoutMethods : [],
       ticketTypes: Array.isArray(ev.ticketTypes)
         ? ev.ticketTypes.map((t) => ({
             id: t.id,
             name: t.name,
-            pricePkr: Number(t.pricePkr || 0),
+            ...toAppTicketPrice(t),
             capacity: Number(t.capacity || 0),
             soldCount: Number(t.soldCount || 0),
-            maxPerPerson: t.maxPerPerson ? Number(t.maxPerPerson) : null,
           }))
         : [],
       isFeatured: Boolean(ev.isFeatured),
@@ -155,10 +155,12 @@ export const eventConverter: FirestoreDataConverter<Event> = {
       ? d.ticketTypes.map((t: Record<string, unknown>, idx: number) => ({
           id: (t.id as string) || `ticket-${idx}`,
           name: (t.name as string) || "Standard",
-          pricePkr: Number(t.pricePkr ?? 0),
+          // The app and payment server use priceInPkr / maxPerOrder; older admin docs only have pricePkr.
+          pricePkr: Number(t.priceInPkr ?? t.pricePkr ?? 0),
           capacity: Number(t.capacity ?? 0),
           soldCount: Number(t.soldCount ?? 0),
-          maxPerPerson: t.maxPerPerson != null ? Number(t.maxPerPerson) : undefined,
+          maxPerPerson:
+            t.maxPerPerson != null ? Number(t.maxPerPerson) : t.maxPerOrder != null ? Number(t.maxPerOrder) : undefined,
         }))
       : [];
 
@@ -188,6 +190,7 @@ export const eventConverter: FirestoreDataConverter<Event> = {
       priceMinPkr: d.priceMinPkr != null ? Number(d.priceMinPkr) : null,
       priceMaxPkr: d.priceMaxPkr != null ? Number(d.priceMaxPkr) : null,
       ticketUrl: d.ticketUrl ?? null,
+      payoutMethods: Array.isArray(d.payoutMethods) ? d.payoutMethods : [],
       ticketTypes,
       isFeatured: Boolean(d.isFeatured),
       status: d.status || "draft",
@@ -249,6 +252,7 @@ export const organizerConverter: FirestoreDataConverter<Organizer> = {
       linkedUserId: d.linkedUserId ?? null,
       linkedUserEmail: d.linkedUserEmail ?? null,
       status: d.status || "active",
+      acceptsPayments: d.acceptsPayments === true,
       eventCount: Number(d.eventCount || 0),
       upcomingEventCount: Number(d.upcomingEventCount || 0),
       createdAt: d.createdAt instanceof Timestamp ? d.createdAt.toDate() : undefined,
@@ -256,6 +260,16 @@ export const organizerConverter: FirestoreDataConverter<Organizer> = {
     };
   },
 };
+
+/**
+ * Ticket price fields as the app and the payment server read them (priceInPkr,
+ * maxPerOrder), plus the admin's own names so older readers keep working.
+ */
+export function toAppTicketPrice(t: { pricePkr?: number | null; maxPerPerson?: number | null }) {
+  const price = Number(t.pricePkr || 0);
+  const max = t.maxPerPerson ? Number(t.maxPerPerson) : null;
+  return { pricePkr: price, priceInPkr: price, maxPerPerson: max, maxPerOrder: max ?? 8 };
+}
 
 export const registrationConverter: FirestoreDataConverter<Registration> = {
   toFirestore: (r) => {
@@ -278,20 +292,37 @@ export const registrationConverter: FirestoreDataConverter<Registration> = {
   },
   fromFirestore: (snap) => {
     const d = snap.data();
+    // App registrations: firstName/lastName, phone, quantityByTicketType, amountPkr, payment.
+    const qtyMap = (d.quantityByTicketType ?? {}) as Record<string, number>;
+    const appQty = Object.values(qtyMap).reduce((a, b) => a + Number(b || 0), 0);
+    const toDate = (v: unknown) => (v instanceof Timestamp ? v.toDate() : null);
+    const p = d.payment;
     return {
       id: snap.id,
       eventId: d.eventId || "",
       eventTitle: d.eventTitle || "",
       userId: d.userId || "",
-      userEmail: d.userEmail || "",
-      userName: d.userName || "",
+      userEmail: d.userEmail || d.email || "",
+      userName: d.userName || `${d.firstName ?? ""} ${d.lastName ?? ""}`.trim(),
       userPhone: d.userPhone || d.phone || "",
       status: d.status || "confirmed",
-      checkedIn: Boolean(d.checkedIn),
-      ticketTypeId: d.ticketTypeId || "",
+      checkedIn: Boolean(d.checkedIn || d.checkedInAt),
+      ticketTypeId: d.ticketTypeId || Object.keys(qtyMap)[0] || "",
       ticketTypeName: d.ticketTypeName || "",
-      quantity: Number(d.quantity || 1),
-      totalPkr: Number(d.totalPkr || 0),
+      quantity: Number(d.quantity || appQty || 1),
+      totalPkr: Number(d.totalPkr ?? d.amountPkr ?? 0),
+      organizerId: d.organizerId ?? null,
+      reference: d.reference || "",
+      payment: p
+        ? {
+            method: p.method ?? null,
+            transactionId: p.transactionId ?? null,
+            proofPath: p.proofPath ?? null,
+            submittedAt: toDate(p.submittedAt),
+            holdExpiresAt: toDate(p.holdExpiresAt),
+            rejectionReason: p.rejectionReason ?? null,
+          }
+        : null,
       createdAt: d.createdAt instanceof Timestamp ? d.createdAt.toDate() : new Date(),
     };
   },

@@ -17,7 +17,9 @@ import {
   ShieldAlert,
   LogOut,
   Sparkles,
+  Wallet,
 } from "lucide-react";
+import { fetchPayoutQueueCount } from "@/features/payments/api";
 import { Avatar } from "@/components/ui/Avatar";
 
 export function Sidebar() {
@@ -57,6 +59,14 @@ export function Sidebar() {
     staleTime: 30_000,
   });
 
+  // Payout accounts waiting for approval
+  const { data: payoutCount = 0 } = useQuery({
+    queryKey: qk.payouts.queueCount,
+    queryFn: () => fetchPayoutQueueCount().catch(() => 0),
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+
   const navItems = [
     {
       name: "Dashboard",
@@ -82,6 +92,13 @@ export function Sidebar() {
       href: "/organizers",
       icon: Users2,
       isActive: pathname.startsWith("/organizers"),
+    },
+    {
+      name: "Payouts",
+      href: "/payouts",
+      icon: Wallet,
+      isActive: pathname.startsWith("/payouts"),
+      badge: payoutCount > 0 ? payoutCount : undefined,
     },
     {
       name: "Users",

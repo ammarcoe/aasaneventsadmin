@@ -6,6 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import { qk } from "@/lib/queryKeys";
 import { fetchOrganizer } from "@/features/organizers/api";
 import { OrganizerForm } from "@/features/organizers/OrganizerForm";
+import { PayoutStatusCard } from "@/features/payments/PayoutStatusCard";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { Users2 } from "lucide-react";
@@ -48,5 +49,10 @@ export function EditOrganizerClient() {
     );
   }
 
-  return <OrganizerForm initialData={organizer} />;
+  return (
+    <div className="flex flex-col gap-6">
+      <OrganizerForm initialData={organizer} />
+      <PayoutStatusCard organizerId={organizer.id} hasOwner={Boolean(organizer.linkedUserId)} />
+    </div>
+  );
 }

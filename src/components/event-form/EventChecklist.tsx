@@ -74,11 +74,13 @@ export function EventChecklist({ data, isUploadingImages }: EventChecklistProps)
     });
   }
 
-  if (data.priceMinPkr && data.priceMinPkr > 0 && (!data.ticketUrl || data.ticketUrl.length === 0)) {
+  const isPaid =
+    Boolean(data.priceMinPkr && data.priceMinPkr > 0) || Boolean(data.ticketTypes?.some((t) => t.pricePkr > 0));
+  if (isPaid && !data.sellsInApp && (!data.ticketUrl || data.ticketUrl.length === 0)) {
     items.push({
       id: "ticket-url-required",
       type: "blocking",
-      label: "Paid events need a link where people can buy",
+      label: "Paid events need a ticket link, or an organizer with approved payment accounts",
       targetId: "field-ticket-url",
     });
   }

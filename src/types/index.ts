@@ -84,6 +84,8 @@ export interface Event {
   priceMinPkr: number | null;
   priceMaxPkr: number | null;
   ticketUrl: string | null;
+  /** Paid in-app events: payout types that take this event's money (empty = all approved). */
+  payoutMethods?: PayoutType[];
   ticketTypes: TicketType[];
   isFeatured: boolean;
   status: EventStatus;
@@ -115,6 +117,8 @@ export interface Organizer {
   linkedUserId: string | null;
   linkedUserEmail?: string | null;
   status: 'active' | 'suspended';
+  /** Set by the server once an admin approves payout accounts. */
+  acceptsPayments?: boolean;
   eventCount: number;
   upcomingEventCount: number;
   createdAt?: Date;
@@ -128,6 +132,43 @@ export interface UserProfile {
   role?: 'admin' | 'organizer' | 'user';
   isAdmin?: boolean;
   linkedOrganizerId?: string | null;
+}
+
+export type PayoutType = 'raast' | 'jazzcash' | 'easypaisa' | 'iban';
+
+export interface PayoutMethod {
+  type: PayoutType;
+  value: string; // 03XXXXXXXXX or PK.. IBAN, normalized by the server
+  accountTitle: string;
+}
+
+export interface PayoutProfile {
+  methods: PayoutMethod[];
+  qrImagePath: string | null;
+  at: Date | null; // submittedAt (pending) or approvedAt (active)
+}
+
+export interface PayoutSettings {
+  active: PayoutProfile | null;
+  pending: PayoutProfile | null;
+  rejectionReason: string | null;
+}
+
+export type RegistrationStatus =
+  | 'awaiting_payment'
+  | 'in_review'
+  | 'confirmed'
+  | 'rejected'
+  | 'expired'
+  | 'cancelled';
+
+export interface RegistrationPayment {
+  method: PayoutType | null;
+  transactionId: string | null;
+  proofPath: string | null;
+  submittedAt: Date | null;
+  holdExpiresAt: Date | null;
+  rejectionReason: string | null;
 }
 
 export interface Registration {
@@ -144,6 +185,9 @@ export interface Registration {
   ticketTypeName: string;
   quantity: number;
   totalPkr: number;
+  organizerId?: string | null;
+  reference?: string;
+  payment?: RegistrationPayment | null;
   createdAt: Date;
 }
 

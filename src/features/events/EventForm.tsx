@@ -21,7 +21,8 @@ import { pktToDate, dateToPktParts, pktLabel } from "@/lib/pkt";
 import { formatPKR } from "@/lib/utils";
 import { parseMapsInput } from "@/lib/maps";
 import { useAuth } from "@/features/auth/AuthContext";
-import type { Event, EventImage, TicketType, Organizer } from "@/types";
+import type { Event, EventImage, TicketType, Organizer, PayoutType } from "@/types";
+import { fetchPayoutSettings, methodLabel, displayValue } from "@/features/payments/api";
 
 // Subcomponents
 import { SectionNav, FormSectionStatus } from "@/components/event-form/SectionNav";
@@ -154,6 +155,9 @@ export function EventForm({ initialEvent, onSuccess }: EventFormProps) {
         ]
   );
   const [ticketUrl, setTicketUrl] = useState(initialEvent?.ticketUrl || "");
+  // Paid events sell in the app (organizer's approved accounts) or through a ticket link.
+  const [saleMode, setSaleMode] = useState<"app" | "link">(initialEvent?.ticketUrl ? "link" : "app");
+  const [payoutMethods, setPayoutMethods] = useState<PayoutType[]>(initialEvent?.payoutMethods ?? []);
 
   // Details v2 (Audience, Languages, Amenities, Agenda, FAQ)
   const [audience, setAudience] = useState<string[]>(initialEvent?.audience || []);
@@ -217,6 +221,15 @@ export function EventForm({ initialEvent, onSuccess }: EventFormProps) {
     return Math.max(...ticketTypes.map((t) => t.pricePkr));
   }, [ticketTypes]);
 
+  const isPaid = ticketTypes.some((t) => t.pricePkr > 0);
+  const { data: payoutSettings, isLoading: isPayoutLoading } = useQuery({
+    queryKey: qk.payouts.detail(organizerId || "_"),
+    queryFn: () => fetchPayoutSettings(organizerId as string),
+    enabled: Boolean(organizerId) && isPaid,
+  });
+  const approvedMethods = payoutSettings?.active?.methods ?? [];
+  const sellsInApp = isPaid && saleMode === "app" && approvedMethods.length > 0;
+
   // Handle Maps link parsing
   const handleMapsInputChange = (val: string) => {
     setMapsInput(val);
@@ -248,7 +261,9 @@ export function EventForm({ initialEvent, onSuccess }: EventFormProps) {
       organizerName: organizerName || "Organizer",
       priceMinPkr,
       priceMaxPkr,
-      ticketUrl: ticketUrl || null,
+      ticketUrl: saleMode === "link" ? ticketUrl || null : null,
+      payoutMethods: saleMode === "app" ? payoutMethods : [],
+      sellsInApp,
       ticketTypes,
       isFeatured,
       status: initialEvent?.status || "draft",
@@ -278,6 +293,9 @@ export function EventForm({ initialEvent, onSuccess }: EventFormProps) {
     priceMinPkr,
     priceMaxPkr,
     ticketUrl,
+    saleMode,
+    payoutMethods,
+    sellsInApp,
     ticketTypes,
     isFeatured,
     initialEvent,
@@ -300,7 +318,8 @@ export function EventForm({ initialEvent, onSuccess }: EventFormProps) {
     const imagesComplete = images.length > 0 && !isUploadingImages;
 
     const ticketsHasError = Boolean(errors.ticketUrl || errors.ticketTypes || errors.priceMaxPkr);
-    const ticketsComplete = ticketTypes.length > 0 && (priceMinPkr === 0 || Boolean(ticketUrl));
+    const ticketsComplete =
+      ticketTypes.length > 0 && (!isPaid || (saleMode === "link" ? Boolean(ticketUrl) : sellsInApp));
 
     const detailsHasError = Boolean(errors.agenda || errors.faq);
     const detailsComplete = agenda.length > 0 || faq.length > 0 || amenities.length > 0;
@@ -345,6 +364,9 @@ export function EventForm({ initialEvent, onSuccess }: EventFormProps) {
     ticketTypes,
     priceMinPkr,
     ticketUrl,
+    isPaid,
+    saleMode,
+    sellsInApp,
     agenda.length,
     faq.length,
     amenities.length,
@@ -1106,23 +1128,79 @@ export function EventForm({ initialEvent, onSuccess }: EventFormProps) {
               ))}
             </div>
 
-            {/* Paid Ticket Checkout Link */}
-            {priceMinPkr > 0 && (
-              <div className="space-y-1 pt-2" id="field-ticket-url">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-semibold text-[var(--color-ink)]">
-                    Ticket / Booking URL <span className="text-[var(--color-crimson)]">*</span>
-                  </label>
-                  <span className="text-[10px] text-[var(--color-ink-muted)]">
-                    Required for paid events
-                  </span>
+            {/* How people pay for paid tickets */}
+            {isPaid && (
+              <div className="space-y-3 pt-2" id="field-ticket-url">
+                <label className="text-xs font-semibold text-[var(--color-ink)]">
+                  How people pay <span className="text-[var(--color-crimson)]">*</span>
+                </label>
+                <div className="flex gap-2">
+                  {(
+                    [
+                      ["app", "In the app"],
+                      ["link", "Own ticket link"],
+                    ] as const
+                  ).map(([mode, label]) => (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setSaleMode(mode)}
+                      className={`text-xs px-3.5 py-1.5 rounded-full border transition-colors cursor-pointer ${
+                        saleMode === mode
+                          ? "bg-[var(--color-ink)] text-[var(--color-on-ink)] border-[var(--color-ink)]"
+                          : "bg-[var(--color-surface)] border-[var(--color-border-subtle)] text-[var(--color-ink-muted)]"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
                 </div>
-                <Input
-                  placeholder="https://ticketwala.pk/event/... or WhatsApp booking link"
-                  value={ticketUrl}
-                  onChange={(e) => setTicketUrl(e.target.value)}
-                  error={errors.ticketUrl}
-                />
+
+                {saleMode === "link" ? (
+                  <Input
+                    placeholder="https://ticketwala.pk/event/... or WhatsApp booking link"
+                    value={ticketUrl}
+                    onChange={(e) => setTicketUrl(e.target.value)}
+                    error={errors.ticketUrl}
+                  />
+                ) : !organizerId ? (
+                  <p className="text-xs text-[var(--color-ink-muted)]">Pick an organizer to see their payment accounts.</p>
+                ) : isPayoutLoading ? (
+                  <p className="text-xs text-[var(--color-ink-muted)]">Loading payment accounts…</p>
+                ) : approvedMethods.length === 0 ? (
+                  <p className="text-xs text-[var(--color-crimson)]">
+                    {organizerName || "This organizer"} has no approved payment accounts yet. Approve them in{" "}
+                    <Link href="/payouts" className="underline">
+                      Payout reviews
+                    </Link>
+                    , or use a ticket link.
+                  </p>
+                ) : (
+                  <div className="space-y-2">
+                    <p className="text-[11px] text-[var(--color-ink-muted)]">
+                      Attendees pay {organizerName || "the organizer"} directly. Tick the accounts for this event; none
+                      ticked means all of them.
+                    </p>
+                    {approvedMethods.map((m) => (
+                      <label key={m.type} className="flex items-center gap-3 text-xs cursor-pointer">
+                        <input
+                          type="checkbox"
+                          className="accent-[var(--color-accent)]"
+                          checked={payoutMethods.includes(m.type)}
+                          onChange={(e) =>
+                            setPayoutMethods((prev) =>
+                              e.target.checked ? [...prev, m.type] : prev.filter((t) => t !== m.type)
+                            )
+                          }
+                        />
+                        <span className="font-semibold text-[var(--color-ink)] w-28">{methodLabel(m)}</span>
+                        <span className="font-mono text-[var(--color-ink)]">{displayValue(m)}</span>
+                        <span className="text-[var(--color-ink-muted)]">{m.accountTitle}</span>
+                      </label>
+                    ))}
+                    {errors.ticketUrl && <p className="text-xs text-[var(--color-crimson)]">{errors.ticketUrl}</p>}
+                  </div>
+                )}
               </div>
             )}
           </section>

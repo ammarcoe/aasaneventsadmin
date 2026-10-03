@@ -15,5 +15,10 @@ export const qk = {
   registrations: {
     byEvent: (id: string) => ["registrations", id] as const,
   },
+  payouts: {
+    queue: ["payouts", "queue"] as const,
+    queueCount: ["payouts", "queue-count"] as const,
+    detail: (organizerId: string) => ["payouts", "detail", organizerId] as const,
+  },
   dashboard: ["dashboard"] as const,
 };

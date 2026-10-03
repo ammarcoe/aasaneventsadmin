@@ -34,8 +34,8 @@ export function getPublishGateMissingItems(data: Partial<EventFormValues>): stri
   const isPaid =
     Boolean(data.priceMinPkr && data.priceMinPkr > 0) ||
     data.ticketTypes?.some((t) => t.pricePkr > 0);
-  if (isPaid && (!data.ticketUrl || data.ticketUrl.trim().length === 0)) {
-    missing.push("Paid events require a ticket URL");
+  if (isPaid && !data.sellsInApp && (!data.ticketUrl || data.ticketUrl.trim().length === 0)) {
+    missing.push("Paid events need a ticket link, or an organizer with approved payment accounts");
   }
 
   return missing;
